@@ -7,11 +7,13 @@ namespace esphome {
 namespace media_player {
 
 enum MediaPlayerState : uint8_t {
-  MEDIA_PLAYER_STATE_NONE = 0,
-  MEDIA_PLAYER_STATE_IDLE = 1,
-  MEDIA_PLAYER_STATE_PLAYING = 2,
-  MEDIA_PLAYER_STATE_PAUSED = 3,
-  MEDIA_PLAYER_STATE_ANNOUNCING = 4
+  MEDIA_PLAYER_STATE_OFF = 0,
+  MEDIA_PLAYER_STATE_ON = 1,
+  MEDIA_PLAYER_STATE_NONE = 2,
+  MEDIA_PLAYER_STATE_IDLE = 3,
+  MEDIA_PLAYER_STATE_PLAYING = 4,
+  MEDIA_PLAYER_STATE_PAUSED = 5,
+  MEDIA_PLAYER_STATE_ANNOUNCING = 6
 };
 const char *media_player_state_to_string(MediaPlayerState state);
 
@@ -24,21 +26,12 @@ enum MediaPlayerCommand : uint8_t {
   MEDIA_PLAYER_COMMAND_TOGGLE = 5,
   MEDIA_PLAYER_COMMAND_VOLUME_UP = 6,
   MEDIA_PLAYER_COMMAND_VOLUME_DOWN = 7,
+  MEDIA_PLAYER_COMMAND_NEXT_TRACK = 8,
+  MEDIA_PLAYER_COMMAND_PREVIOUS_TRACK = 9,
+  MEDIA_PLAYER_COMMAND_TURN_ON = 10,
+  MEDIA_PLAYER_COMMAND_TURN_OFF = 11,
 };
 const char *media_player_command_to_string(MediaPlayerCommand command);
-
-enum class MediaPlayerFormatPurpose : uint8_t {
-  PURPOSE_DEFAULT = 0,
-  PURPOSE_ANNOUNCEMENT = 1,
-};
-
-struct MediaPlayerSupportedFormat {
-  std::string format;
-  uint32_t sample_rate;
-  uint32_t num_channels;
-  MediaPlayerFormatPurpose purpose;
-  uint32_t sample_bytes;
-};
 
 class MediaPlayer;
 
@@ -50,11 +43,18 @@ class MediaPlayerTraits {
 
   bool get_supports_pause() const { return this->supports_pause_; }
 
-  std::vector<MediaPlayerSupportedFormat> &get_supported_formats() { return this->supported_formats_; }
+  void set_supports_next_previous_track(bool supports_next_previous_track) { this->supports_next_previous_track_ = supports_next_previous_track; }
+
+  bool get_supports_next_previous_track() const { return this->supports_next_previous_track_; }
+
+  void set_supports_turn_off_on(bool supports_turn_off_on) { this->supports_turn_off_on_ = supports_turn_off_on; }
+
+  bool get_supports_turn_off_on() const { return this->supports_turn_off_on_; }
 
  protected:
   bool supports_pause_{false};
-  std::vector<MediaPlayerSupportedFormat> supported_formats_{};
+  bool supports_next_previous_track_{false};
+  bool supports_turn_off_on_{false};
 };
 
 class MediaPlayerCall {
@@ -88,7 +88,9 @@ class MediaPlayerCall {
 
 class MediaPlayer : public EntityBase {
  public:
-  MediaPlayerState state{MEDIA_PLAYER_STATE_NONE};
+  MediaPlayerState state{MEDIA_PLAYER_STATE_OFF};
+  MediaPlayerState prior_state{MEDIA_PLAYER_STATE_OFF};
+
   float volume{1.0f};
 
   MediaPlayerCall make_call() { return MediaPlayerCall(this); }
