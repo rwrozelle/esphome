@@ -1033,6 +1033,7 @@ bool APIConnection::send_media_player_info(media_player::MediaPlayer *media_play
   msg.supports_pause = traits.get_supports_pause();
   msg.supports_next_previous_track = traits.get_supports_next_previous_track();
   msg.supports_turn_off_on = traits.get_supports_turn_off_on();
+  msg.supports_grouping = traits.get_supports_grouping();
 
   for (auto &supported_format : traits.get_supported_formats()) {
     MediaPlayerSupportedFormat media_format;
@@ -1069,6 +1070,9 @@ void APIConnection::media_player_command(const MediaPlayerCommandRequest &msg) {
   }
   if (msg.has_mrm) {
     call.set_mrm(msg.mrm);
+  }
+  if (msg.has_group_members) {
+    call.set_group_members(msg.group_members);
   }
   call.perform();
 }
