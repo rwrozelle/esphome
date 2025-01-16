@@ -40,6 +40,7 @@ enum MediaPlayerCommand : uint8_t {
   MEDIA_PLAYER_COMMAND_UNJOIN = 19,
 };
 const char *media_player_command_to_string(MediaPlayerCommand command);
+
 enum class MediaPlayerFormatPurpose : uint8_t {
   PURPOSE_DEFAULT = 0,
   PURPOSE_ANNOUNCEMENT = 1,
