@@ -311,6 +311,14 @@ bool APIServerConnectionBase::send_list_entities_button_response(const ListEntit
 #ifdef USE_BUTTON
 #endif
 #ifdef USE_MEDIA_PLAYER
+bool APIServerConnectionBase::send_media_player_supported_format(const MediaPlayerSupportedFormat &msg) {
+#ifdef HAS_PROTO_MESSAGE_DUMP
+  ESP_LOGVV(TAG, "send_media_player_supported_format: %s", msg.dump().c_str());
+#endif
+  return this->send_message_<MediaPlayerSupportedFormat>(msg, 119);
+}
+#endif
+#ifdef USE_MEDIA_PLAYER
 bool APIServerConnectionBase::send_list_entities_media_player_response(const ListEntitiesMediaPlayerResponse &msg) {
 #ifdef HAS_PROTO_MESSAGE_DUMP
   ESP_LOGVV(TAG, "send_list_entities_media_player_response: %s", msg.dump().c_str());
