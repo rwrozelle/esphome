@@ -1592,7 +1592,6 @@ message VoiceAssistantTimerEventResponse {
   bool is_active = 6;
 }
 
-
 message VoiceAssistantAnnounceRequest {
   option (id) = 119;
   option (source) = SOURCE_CLIENT;

@@ -25,7 +25,6 @@ IS_PLATFORM_COMPONENT = True
 
 media_player_ns = cg.esphome_ns.namespace("media_player")
 
-
 MediaPlayer = media_player_ns.class_("MediaPlayer")
 
 PlayAction = media_player_ns.class_(
