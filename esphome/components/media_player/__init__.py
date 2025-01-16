@@ -1,10 +1,13 @@
 from esphome import automation
+from esphome.automation import maybe_simple_id
+import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.codegen as cg
 
 from esphome.automation import maybe_simple_id
 from esphome.const import (
     CONF_ID,
+    CONF_ON_IDLE,
     CONF_ON_STATE,
     CONF_TRIGGER_ID,
     CONF_VOLUME,
@@ -21,6 +24,7 @@ CODEOWNERS = ["@jesserockz"]
 IS_PLATFORM_COMPONENT = True
 
 media_player_ns = cg.esphome_ns.namespace("media_player")
+
 
 MediaPlayer = media_player_ns.class_("MediaPlayer")
 
@@ -77,8 +81,8 @@ AnnoucementTrigger = media_player_ns.class_(
 OnTrigger = media_player_ns.class_("OnTrigger", automation.Trigger.template())
 OffTrigger = media_player_ns.class_("OffTrigger", automation.Trigger.template())
 IsIdleCondition = media_player_ns.class_("IsIdleCondition", automation.Condition)
-IsPlayingCondition = media_player_ns.class_("IsPlayingCondition", automation.Condition)
 IsPausedCondition = media_player_ns.class_("IsPausedCondition", automation.Condition)
+IsPlayingCondition = media_player_ns.class_("IsPlayingCondition", automation.Condition)
 IsAnnouncingCondition = media_player_ns.class_(
     "IsAnnouncingCondition", automation.Condition
 )
@@ -211,10 +215,10 @@ async def media_player_play_media_action(config, action_id, template_arg, args):
     "media_player.is_idle", IsIdleCondition, MEDIA_PLAYER_ACTION_SCHEMA
 )
 @automation.register_condition(
-    "media_player.is_playing", IsPlayingCondition, MEDIA_PLAYER_ACTION_SCHEMA
+    "media_player.is_paused", IsPausedCondition, MEDIA_PLAYER_ACTION_SCHEMA
 )
 @automation.register_condition(
-    "media_player.is_paused", IsPausedCondition, MEDIA_PLAYER_ACTION_SCHEMA
+    "media_player.is_playing", IsPlayingCondition, MEDIA_PLAYER_ACTION_SCHEMA
 )
 @automation.register_condition(
     "media_player.is_announcing", IsAnnouncingCondition, MEDIA_PLAYER_ACTION_SCHEMA

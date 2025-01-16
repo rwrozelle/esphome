@@ -39,7 +39,12 @@ enum MediaPlayerCommand : uint8_t {
   MEDIA_PLAYER_COMMAND_JOIN = 18,
   MEDIA_PLAYER_COMMAND_UNJOIN = 19,
 };
+
 const char *media_player_command_to_string(MediaPlayerCommand command);
+enum class MediaPlayerFormatPurpose : uint8_t {
+  PURPOSE_DEFAULT = 0,
+  PURPOSE_ANNOUNCEMENT = 1,
+};
 
 enum MediaPlayerEnqueue : uint8_t {
   MEDIA_PLAYER_ENQUEUE_ADD = 0,
@@ -48,6 +53,14 @@ enum MediaPlayerEnqueue : uint8_t {
   MEDIA_PLAYER_ENQUEUE_REPLACE = 3,
 };
 const char *media_player_enqueue_to_string(MediaPlayerEnqueue enqueue);
+
+struct MediaPlayerSupportedFormat {
+  std::string format;
+  uint32_t sample_rate;
+  uint32_t num_channels;
+  MediaPlayerFormatPurpose purpose;
+  uint32_t sample_bytes;
+};
 
 enum MediaPlayerRepeatMode : uint8_t {
   MEDIA_PLAYER_REPEAT_ALL = 0,
