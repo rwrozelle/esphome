@@ -49,6 +49,7 @@ esphome/components/atc_mithermometer/* @ahpohl
 esphome/components/atm90e26/* @danieltwagner
 esphome/components/atm90e32/* @circuitsetup @descipher
 esphome/components/audio/* @kahrendt
+esphome/components/audio_adc/* @kbx81
 esphome/components/audio_dac/* @kbx81
 esphome/components/axs15231/* @clydebarrow
 esphome/components/b_parasite/* @rbaron
@@ -132,6 +133,8 @@ esphome/components/ens160_i2c/* @latonita
 esphome/components/ens160_spi/* @latonita
 esphome/components/ens210/* @itn3rd77
 esphome/components/es7210/* @kahrendt
+esphome/components/es7243e/* @kbx81
+esphome/components/es8156/* @kbx81
 esphome/components/es8311/* @kahrendt @kroimon
 esphome/components/esp32/* @esphome/core
 esphome/components/esp32_ble/* @Rapsssito @jesserockz
@@ -145,6 +148,7 @@ esphome/components/esp32_rmt_led_strip/* @jesserockz
 esphome/components/esp8266/* @esphome/core
 esphome/components/ethernet_info/* @gtjadsonsantos
 esphome/components/event/* @nohat
+esphome/components/event_emitter/* @Rapsssito
 esphome/components/exposure_notifications/* @OttoWinter
 esphome/components/ezo/* @ssieb
 esphome/components/ezo_pmp/* @carlos-sarmiento
@@ -273,6 +277,7 @@ esphome/components/mics_4514/* @jesserockz
 esphome/components/midea/* @dudanov
 esphome/components/midea_ir/* @dudanov
 esphome/components/mitsubishi/* @RubyBailey
+esphome/components/mixer/speaker/* @kahrendt
 esphome/components/mlx90393/* @functionpointer
 esphome/components/mlx90614/* @jesserockz
 esphome/components/mmc5603/* @benhoff
@@ -339,6 +344,7 @@ esphome/components/radon_eye_rd200/* @jeffeb3
 esphome/components/rc522/* @glmnet
 esphome/components/rc522_i2c/* @glmnet
 esphome/components/rc522_spi/* @glmnet
+esphome/components/resampler/speaker/* @kahrendt
 esphome/components/restart/* @esphome/core
 esphome/components/rf_bridge/* @jesserockz
 esphome/components/rgbct/* @jesserockz
@@ -493,5 +499,6 @@ esphome/components/xiaomi_mhoc401/* @vevsvevs
 esphome/components/xiaomi_rtcgq02lm/* @jesserockz
 esphome/components/xl9535/* @mreditor97
 esphome/components/xpt2046/touchscreen/* @nielsnl68 @numo68
+esphome/components/xxtea/* @clydebarrow
 esphome/components/zhlt01/* @cfeenstra1024
 esphome/components/zio_ultrasonic/* @kahrendt

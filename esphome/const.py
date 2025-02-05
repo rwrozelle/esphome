@@ -15,15 +15,6 @@ PLATFORM_LIBRETINY_OLDSTYLE = "libretiny"
 PLATFORM_RP2040 = "rp2040"
 PLATFORM_RTL87XX = "rtl87xx"
 
-TARGET_PLATFORMS = [
-    PLATFORM_BK72XX,
-    PLATFORM_ESP32,
-    PLATFORM_ESP8266,
-    PLATFORM_HOST,
-    PLATFORM_LIBRETINY_OLDSTYLE,
-    PLATFORM_RP2040,
-    PLATFORM_RTL87XX,
-]
 
 SOURCE_FILE_EXTENSIONS = {".cpp", ".hpp", ".h", ".c", ".tcc", ".ino"}
 HEADER_FILE_EXTENSIONS = {".h", ".hpp", ".tcc"}
@@ -103,6 +94,7 @@ CONF_BRIGHTNESS = "brightness"
 CONF_BRIGHTNESS_LIMITS = "brightness_limits"
 CONF_BROKER = "broker"
 CONF_BSSID = "bssid"
+CONF_BUFFER_DURATION = "buffer_duration"
 CONF_BUFFER_SIZE = "buffer_size"
 CONF_BUILD_PATH = "build_path"
 CONF_BUS_VOLTAGE = "bus_voltage"
@@ -536,9 +528,11 @@ CONF_NAME_FONT = "name_font"
 CONF_NBITS = "nbits"
 CONF_NEC = "nec"
 CONF_NETWORKS = "networks"
+CONF_NEVER = "never"
 CONF_NEW_PASSWORD = "new_password"
 CONF_NITROGEN_DIOXIDE = "nitrogen_dioxide"
 CONF_NOISE_LEVEL = "noise_level"
+CONF_NOTIFY = "notify"
 CONF_NUM_ATTEMPTS = "num_attempts"
 CONF_NUM_CHANNELS = "num_channels"
 CONF_NUM_CHIPS = "num_chips"
@@ -623,6 +617,7 @@ CONF_OTA = "ota"
 CONF_OUTDOOR_TEMPERATURE = "outdoor_temperature"
 CONF_OUTPUT = "output"
 CONF_OUTPUT_ID = "output_id"
+CONF_OUTPUT_SPEAKER = "output_speaker"
 CONF_OUTPUTS = "outputs"
 CONF_OVERSAMPLING = "oversampling"
 CONF_PACKAGES = "packages"
@@ -867,6 +862,7 @@ CONF_TARGET_TEMPERATURE_LOW = "target_temperature_low"
 CONF_TARGET_TEMPERATURE_LOW_COMMAND_TOPIC = "target_temperature_low_command_topic"
 CONF_TARGET_TEMPERATURE_LOW_STATE_TOPIC = "target_temperature_low_state_topic"
 CONF_TARGET_TEMPERATURE_STATE_TOPIC = "target_temperature_state_topic"
+CONF_TASK_STACK_IN_PSRAM = "task_stack_in_psram"
 CONF_TEMPERATURE = "temperature"
 CONF_TEMPERATURE_COMPENSATION = "temperature_compensation"
 CONF_TEMPERATURE_OFFSET = "temperature_offset"
