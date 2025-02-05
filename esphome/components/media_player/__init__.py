@@ -2,9 +2,6 @@ from esphome import automation
 from esphome.automation import maybe_simple_id
 import esphome.codegen as cg
 import esphome.config_validation as cv
-import esphome.codegen as cg
-
-from esphome.automation import maybe_simple_id
 from esphome.const import (
     CONF_ID,
     CONF_ON_IDLE,
