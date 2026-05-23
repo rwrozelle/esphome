@@ -211,8 +211,18 @@ void MDNSComponent::compile_records_(StaticVector<MDNSService, MDNS_SERVICE_COUN
   web_service.port = []() -> uint16_t { return USE_WEBSERVER_PORT; };
 #endif
 
+#ifdef USE_COAP_SERVER
+  MDNS_STATIC_CONST_CHAR(SERVICE_COAP, "_coap");
+  MDNS_STATIC_CONST_CHAR(SERVICE_UDP, "_udp");
+
+  auto &coap_service = services.emplace_next();
+  coap_service.service_type = MDNS_STR(SERVICE_COAP);
+  coap_service.proto = MDNS_STR(SERVICE_UDP);
+  coap_service.port = []() -> uint16_t { return USE_COAP_SERVER_PORT; };
+#endif
+
 #if !defined(USE_API) && !defined(USE_PROMETHEUS) && !defined(USE_SENDSPIN) && !defined(USE_WEBSERVER) && \
-    !defined(USE_MDNS_EXTRA_SERVICES)
+    !defined(USE_MDNS_EXTRA_SERVICES) && !defined(USE_COAP_SERVER)
   MDNS_STATIC_CONST_CHAR(SERVICE_HTTP, "_http");
   MDNS_STATIC_CONST_CHAR(TXT_VERSION, "version");
 
