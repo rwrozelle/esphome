@@ -133,31 +133,37 @@ class CoapServer final : public Component, public Controller {
                                       otError error);
   static void handle_info_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
   static void handle_ping_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  static void handle_state_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  void handle_state_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info);
+  static void handle_unknown_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
+  void handle_component_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info,
+                                const EntityType type);
 
+#ifdef USE_BINARY_SENSOR
+  static void handle_binary_sensor_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
+#endif
 #ifdef USE_BUTTON
   static void handle_button_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
   void handle_button_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info);
 #endif
-#ifdef USE_NUMBER
-  static void handle_number_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  void handle_number_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info);
-#endif
-#ifdef USE_SWITCH
-  static void handle_switch_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  void handle_switch_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info);
-#endif
 #ifdef USE_LOCK
   static void handle_lock_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  void handle_lock_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info);
 #endif
 #ifdef USE_LOGGER
   static void handle_logs_request(void *context, otMessage *message, const otMessageInfo *message_info);
 #endif  // USE_LOGGER
+#ifdef USE_NUMBER
+  static void handle_number_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
+#endif
+#ifdef USE_SENSOR
+  static void handle_sensor_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
+#endif
+#ifdef USE_SWITCH
+  static void handle_switch_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
+#endif
+#ifdef USE_TEXT_SENSOR
+  static void handle_text_sensor_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
+#endif
 #ifdef USE_VALVE
   static void handle_valve_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  void handle_valve_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info);
 #endif
 
   void shrink_observers();
@@ -204,6 +210,18 @@ class CoapServer final : public Component, public Controller {
   float client_ping_timeout_ratio_{2.5f};
   bool subscription_confirm_{false};
 
+#ifdef USE_BINARY_SENSOR
+  size_t cbor_output_(uint8_t *buffer, binary_sensor::BinarySensor *entity);
+#endif  // USE_BINARY_SENSOR
+
+#ifdef USE_LOCK
+  size_t cbor_output_(uint8_t *buffer, lock::Lock *entity);
+#endif  // USE_LOCK
+
+#ifdef USE_NUMBER
+  size_t cbor_output_(uint8_t *buffer, number::Number *entity);
+#endif  // USE_NUMBER
+
 #ifdef USE_SENSOR
   size_t cbor_output_(uint8_t *buffer, sensor::Sensor *entity);
 #endif  // USE_SENSOR
@@ -212,21 +230,9 @@ class CoapServer final : public Component, public Controller {
   size_t cbor_output_(uint8_t *buffer, switch_::Switch *entity);
 #endif  // USE_SWITCH
 
-#ifdef USE_BINARY_SENSOR
-  size_t cbor_output_(uint8_t *buffer, binary_sensor::BinarySensor *entity);
-#endif  // USE_BINARY_SENSOR
-
 #ifdef USE_TEXT_SENSOR
   size_t cbor_output_(uint8_t *buffer, text_sensor::TextSensor *entity);
 #endif  // USE_TEXT_SENSOR
-
-#ifdef USE_NUMBER
-  size_t cbor_output_(uint8_t *buffer, number::Number *entity);
-#endif  // USE_NUMBER
-
-#ifdef USE_LOCK
-  size_t cbor_output_(uint8_t *buffer, lock::Lock *entity);
-#endif  // USE_LOCK
 
 #ifdef USE_VALVE
   size_t cbor_output_(uint8_t *buffer, valve::Valve *entity);

@@ -46,7 +46,7 @@ void CoapServer::setup() {
     this->oscore_sender_seq_no_ = stored_threshold;
     this->oscore_save_seq_no_();
   }
-#endif
+#endif  // USE_COAP_OSCORE
 
   // Count exactly how many resources will be registered so FixedVector allocates once.
   // .well-known/core + info + 1 per sensor + 2 per switch (state + toggle) + 1 per binary sensor + 1 per button
@@ -453,31 +453,27 @@ void CoapServer::handle_notification_ack(void *context, otMessage *message, cons
   }
 }
 
-// static handler - catchall for non actionable components
-void CoapServer::handle_state_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_state_request");
-  resource->server->handle_state_request(resource, message, message_info);
-}
-
-void CoapServer::handle_state_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info) {
+void CoapServer::handle_component_request(ehCoapResource *resource, otMessage *message,
+                                          const otMessageInfo *message_info, const EntityType type) {
   otError error = OT_ERROR_NONE;
   otMessage *response = nullptr;
   otInstance *instance = this->instance_;
   uint8_t payload_buffer[COAP_PAYLOAD_MAX_SIZE];
   size_t payload_len = 0;
-  otCoapOptionContentFormat content_format = OT_COAP_OPTION_CONTENT_FORMAT_CBOR;
+  uint16_t msg_offset;
+  uint16_t msg_len;
 
   this->touch_client_(*message_info);
 
   response = otCoapNewMessage(instance, nullptr);
-  if (response == nullptr) {
+  if (response == nullptr)
     return;
-  }
 
-  // GET request
-  if (otCoapMessageGetCode(message) == OT_COAP_CODE_GET) {
-    // Check if client is trying to subscribe or cancel subscription to resource
+  if (type == ENTITYTYPE_UNKNOWN) {
+    SuccessOrExit(
+        error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_METHOD_NOT_ALLOWED));
+    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+  } else if (otCoapMessageGetCode(message) == OT_COAP_CODE_GET) {
     uint8_t observe = 3;
     bool observe_option_present = false;
     ehCoapObserver *observer = nullptr;
@@ -486,10 +482,7 @@ void CoapServer::handle_state_request(ehCoapResource *resource, otMessage *messa
       observe_option_present = (observe < 3);
       observer = this->get_observer_(message, message_info);
       ehCoapObserver *obs = nullptr;
-
       if (observe_option_present && observer != nullptr && observe == 0) {
-        ESP_LOGD(TAG, "Ignore request for Observation, it already exists");
-        // exists and subscriber still wants it.
         observe_option_present = false;
       }
       if (observe_option_present) {
@@ -501,8 +494,6 @@ void CoapServer::handle_state_request(ehCoapResource *resource, otMessage *messa
             SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
             goto exit;
           }
-          // Free any stale observer from the same client IP for this resource.
-          // Port is intentionally excluded: clients may use ephemeral ports that change on restart.
           for (ehCoapObserver *stale = this->active_observers_; stale != nullptr; stale = stale->next) {
             if (stale->resource == resource &&
                 otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
@@ -512,12 +503,10 @@ void CoapServer::handle_state_request(ehCoapResource *resource, otMessage *messa
               break;
             }
           }
-          // new subscriber
           ESP_LOGD(TAG, "Create Observer");
           otCoapToken token;
           SuccessOrExit(error = otCoapMessageReadToken(message, &token));
           obs = this->new_observer_(resource, *message_info, token, otCoapMessageGetType(message));
-          // register client if not already tracked
           bool client_known;
           {
             std::lock_guard<std::mutex> guard(this->lock_);
@@ -530,16 +519,11 @@ void CoapServer::handle_state_request(ehCoapResource *resource, otMessage *messa
           std::lock_guard<std::mutex> lock(this->lock_);
           this->free_observer_(observer);
         }
-        if (obs != nullptr) {
+        if (obs != nullptr)
           observer = obs;
-        }
       }
     }
-    if (observer != nullptr) {
-      payload_len = cbor_output_(payload_buffer, observer->resource);
-    } else {
-      payload_len = cbor_output_(payload_buffer, resource);
-    }
+    payload_len = cbor_output_(payload_buffer, observer != nullptr ? observer->resource : resource);
     if (payload_len == 0) {
       SuccessOrExit(
           error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
@@ -550,7 +534,123 @@ void CoapServer::handle_state_request(ehCoapResource *resource, otMessage *messa
     if (resource->observable && observer != nullptr && observe_option_present && observe == 0) {
       SuccessOrExit(error = otCoapMessageAppendObserveOption(response, observer->observe_serial++));
     }
-    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, content_format));
+    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
+    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
+    SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
+    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+  } else if ((type == ENTITYTYPE_SWITCH || type == ENTITYTYPE_BUTTON || type == ENTITYTYPE_NUMBER ||
+              type == ENTITYTYPE_LOCK || type == ENTITYTYPE_VALVE) &&
+             otCoapMessageGetCode(message) == OT_COAP_CODE_POST) {
+    msg_offset = otMessageGetOffset(message);
+    msg_len = otMessageGetLength(message) - msg_offset;
+    if (msg_len > 0 && msg_len <= COAP_PAYLOAD_MAX_SIZE) {
+      uint8_t msg_buf[COAP_PAYLOAD_MAX_SIZE];
+      otMessageRead(message, msg_offset, msg_buf, msg_len);
+      CborParser parser;
+      CborValue root, map_val;
+      if (cbor_parser_init(msg_buf, msg_len, 0, &parser, &root) == CborNoError && cbor_value_is_map(&root) &&
+          cbor_value_enter_container(&root, &map_val) == CborNoError) {
+        while (!cbor_value_at_end(&map_val)) {
+          int key = 0;
+          bool key_ok = cbor_value_get_int(&map_val, &key) == CborNoError;
+          cbor_value_advance(&map_val);
+          if (cbor_value_at_end(&map_val))
+            break;
+          // Action By Type
+          switch (type) {
+#ifdef USE_SWITCH
+            case EntityType::ENTITYTYPE_SWITCH:
+              if (key_ok && key == 4 && cbor_value_is_boolean(&map_val)) {
+                bool val = false;
+                if (cbor_value_get_boolean(&map_val, &val) == CborNoError) {
+                  auto *sw = static_cast<switch_::Switch *>(resource->entity);
+                  if (resource->action == ACTIONTYPE_TOGGLE) {
+                    if (val)
+                      sw->toggle();
+                  } else {
+                    if (val)
+                      sw->turn_on();
+                    else
+                      sw->turn_off();
+                  }
+                }
+              }
+              break;
+#endif  // USE_SWITCH
+#ifdef USE_NUMBER
+            case EntityType::ENTITYTYPE_NUMBER:
+              if (key_ok && key == 2) {
+                double d = 0.0;
+                bool got_val = false;
+                if (cbor_value_is_float(&map_val) || cbor_value_is_double(&map_val) ||
+                    cbor_value_is_half_float(&map_val)) {
+                  got_val = cbor_value_get_double(&map_val, &d) == CborNoError;
+                } else if (cbor_value_is_integer(&map_val)) {
+                  int64_t i = 0;
+                  if (cbor_value_get_int64(&map_val, &i) == CborNoError) {
+                    d = static_cast<double>(i);
+                    got_val = true;
+                  }
+                }
+                if (got_val)
+                  static_cast<number::Number *>(resource->entity)
+                      ->make_call()
+                      .set_value(static_cast<float>(d))
+                      .perform();
+              }
+              break;
+#endif  // USE_NUMBER
+#ifdef USE_LOCK
+            case EntityType::ENTITYTYPE_LOCK:
+              if (key_ok && key == 4 && cbor_value_is_boolean(&map_val)) {
+                bool val = false;
+                if (cbor_value_get_boolean(&map_val, &val) == CborNoError) {
+                  auto *lk = static_cast<lock::Lock *>(resource->entity);
+                  if (val)
+                    lk->lock();
+                  else
+                    lk->unlock();
+                }
+              }
+              break;
+#endif  // USE_LOCK
+#ifdef USE_VALVE
+            case EntityType::ENTITYTYPE_VALVE:
+              if (key_ok && key == 4 && cbor_value_is_boolean(&map_val)) {
+                bool val = false;
+                if (cbor_value_get_boolean(&map_val, &val) == CborNoError) {
+                  auto *vv = static_cast<valve::Valve *>(resource->entity);
+                  if (resource->action == ACTIONTYPE_STOP) {
+                    if (val)
+                      vv->make_call().set_command_stop().perform();
+                  } else {
+                    if (val)
+                      vv->make_call().set_command_open().perform();
+                    else
+                      vv->make_call().set_command_close().perform();
+                  }
+                }
+              }
+              break;
+#endif  // USE_VALVE
+            default:
+              ESP_LOGW(TAG, "Unknown Type, no action performed");
+          }
+          break;
+        }
+        cbor_value_advance(&map_val);
+      }
+    }
+    payload_len = cbor_output_(payload_buffer, resource);
+
+    if (payload_len == 0) {
+      SuccessOrExit(
+          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
+      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+      goto exit;
+    }
+    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
+    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
     SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
     SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
     SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
@@ -562,11 +662,80 @@ void CoapServer::handle_state_request(ehCoapResource *resource, otMessage *messa
 exit:
   if (error != OT_ERROR_NONE) {
     ESP_LOGE(TAG, "coap send response error %d: %s", error, otThreadErrorToString(error));
-    if (response != nullptr) {
+    if (response != nullptr)
       otMessageFree(response);
-    }
   }
-}  // handle_state_request()
+}  // handle_component_request()
+
+// static handler
+void CoapServer::handle_unknown_request(void *context, otMessage *message, const otMessageInfo *message_info) {
+  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
+  ESP_LOGV(TAG, "handle_binary_sensor_request");
+  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_UNKNOWN);
+}
+
+// static handler
+#ifdef USE_BINARY_SENSOR
+void CoapServer::handle_binary_sensor_request(void *context, otMessage *message, const otMessageInfo *message_info) {
+  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
+  ESP_LOGV(TAG, "handle_binary_sensor_request");
+  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_BINARY_SENSOR);
+}
+#endif
+
+#ifdef USE_LOCK
+// static handler
+void CoapServer::handle_lock_request(void *context, otMessage *message, const otMessageInfo *message_info) {
+  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
+  ESP_LOGV(TAG, "handle_lock_request");
+  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_LOCK);
+}
+#endif
+
+#ifdef USE_NUMBER
+// static handler
+void CoapServer::handle_number_request(void *context, otMessage *message, const otMessageInfo *message_info) {
+  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
+  ESP_LOGV(TAG, "handle_number_request");
+  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_NUMBER);
+}
+#endif
+
+// static handler
+#ifdef USE_SENSOR
+void CoapServer::handle_sensor_request(void *context, otMessage *message, const otMessageInfo *message_info) {
+  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
+  ESP_LOGV(TAG, "handle_sensor_request");
+  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_SENSOR);
+}
+#endif
+
+#ifdef USE_SWITCH
+// static handler
+void CoapServer::handle_switch_request(void *context, otMessage *message, const otMessageInfo *message_info) {
+  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
+  ESP_LOGV(TAG, "handle_switch_request");
+  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_SWITCH);
+}
+#endif
+
+// static handler
+#ifdef USE_TEXT_SENSOR
+void CoapServer::handle_text_sensor_request(void *context, otMessage *message, const otMessageInfo *message_info) {
+  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
+  ESP_LOGV(TAG, "handle_text_sensor_request");
+  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_TEXT_SENSOR);
+}
+#endif
+
+#ifdef USE_VALVE
+// static handler
+void CoapServer::handle_valve_request(void *context, otMessage *message, const otMessageInfo *message_info) {
+  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
+  ESP_LOGV(TAG, "handle_valve_request");
+  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_VALVE);
+}
+#endif
 
 #ifdef USE_BUTTON
 // static handler
@@ -607,598 +776,6 @@ exit:
   }
 }  // handle_button_request()
 #endif  // USE_BUTTON
-
-#ifdef USE_NUMBER
-// static handler
-void CoapServer::handle_number_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_number_request");
-  resource->server->handle_number_request(resource, message, message_info);
-}
-
-void CoapServer::handle_number_request(ehCoapResource *resource, otMessage *message,
-                                       const otMessageInfo *message_info) {
-  otError error = OT_ERROR_NONE;
-  otMessage *response = nullptr;
-  otInstance *instance = this->instance_;
-  uint8_t payload_buffer[COAP_PAYLOAD_MAX_SIZE];
-  size_t payload_len = 0;
-
-  this->touch_client_(*message_info);
-
-  response = otCoapNewMessage(instance, nullptr);
-  if (response == nullptr)
-    return;
-
-  if (otCoapMessageGetCode(message) == OT_COAP_CODE_GET) {
-    uint8_t observe = 3;
-    bool observe_option_present = false;
-    ehCoapObserver *observer = nullptr;
-    observe = this->observe_(message);
-    observe_option_present = (observe < 3);
-    observer = this->get_observer_(message, message_info);
-    ehCoapObserver *obs = nullptr;
-
-    if (observe_option_present && observer != nullptr && observe == 0) {
-      observe_option_present = false;
-    }
-    if (observe_option_present) {
-      if (observe == 0) {
-        bool is_con = (otCoapMessageGetType(message) == OT_COAP_TYPE_CONFIRMABLE);
-        if (this->get_subscription_confirm() != is_con) {
-          SuccessOrExit(
-              error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_BAD_REQUEST));
-          SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-          goto exit;
-        }
-        for (ehCoapObserver *stale = this->active_observers_; stale != nullptr; stale = stale->next) {
-          if (stale->resource == resource &&
-              otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
-            ESP_LOGD(TAG, "Replace stale observer from restarted client");
-            std::lock_guard<std::mutex> lock(this->lock_);
-            this->free_observer_(stale);
-            break;
-          }
-        }
-        ESP_LOGD(TAG, "Create Observer");
-        otCoapToken token;
-        SuccessOrExit(error = otCoapMessageReadToken(message, &token));
-        obs = this->new_observer_(resource, *message_info, token, otCoapMessageGetType(message));
-        bool client_known;
-        {
-          std::lock_guard<std::mutex> guard(this->lock_);
-          client_known = (this->find_client_(message_info->mPeerAddr, message_info->mPeerPort) != nullptr);
-        }
-        if (!client_known)
-          this->new_client_(*message_info);
-      } else if (observe == 1 && observer != nullptr) {
-        ESP_LOGD(TAG, "Cancel Observer");
-        std::lock_guard<std::mutex> lock(this->lock_);
-        this->free_observer_(observer);
-      }
-      if (obs != nullptr)
-        observer = obs;
-    }
-    payload_len = cbor_output_(payload_buffer, observer != nullptr ? observer->resource : resource);
-    if (payload_len == 0) {
-      SuccessOrExit(
-          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
-      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-      goto exit;
-    }
-    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
-    if (observer != nullptr && observe_option_present && observe == 0) {
-      SuccessOrExit(error = otCoapMessageAppendObserveOption(response, observer->observe_serial++));
-    }
-    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
-    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-    SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  } else if (otCoapMessageGetCode(message) == OT_COAP_CODE_POST) {
-    uint16_t msg_offset = otMessageGetOffset(message);
-    uint16_t msg_len = otMessageGetLength(message) - msg_offset;
-    if (msg_len > 0 && msg_len <= COAP_PAYLOAD_MAX_SIZE) {
-      uint8_t msg_buf[COAP_PAYLOAD_MAX_SIZE];
-      otMessageRead(message, msg_offset, msg_buf, msg_len);
-      CborParser parser;
-      CborValue root, map_val;
-      if (cbor_parser_init(msg_buf, msg_len, 0, &parser, &root) == CborNoError && cbor_value_is_map(&root) &&
-          cbor_value_enter_container(&root, &map_val) == CborNoError) {
-        while (!cbor_value_at_end(&map_val)) {
-          int key = 0;
-          bool key_ok = cbor_value_get_int(&map_val, &key) == CborNoError;
-          cbor_value_advance(&map_val);
-          if (cbor_value_at_end(&map_val))
-            break;
-          if (key_ok && key == 2) {
-            double d = 0.0;
-            bool got_val = false;
-            if (cbor_value_is_float(&map_val) || cbor_value_is_double(&map_val) || cbor_value_is_half_float(&map_val)) {
-              got_val = cbor_value_get_double(&map_val, &d) == CborNoError;
-            } else if (cbor_value_is_integer(&map_val)) {
-              int64_t i = 0;
-              if (cbor_value_get_int64(&map_val, &i) == CborNoError) {
-                d = static_cast<double>(i);
-                got_val = true;
-              }
-            }
-            if (got_val)
-              static_cast<number::Number *>(resource->entity)->make_call().set_value(static_cast<float>(d)).perform();
-            break;
-          }
-          cbor_value_advance(&map_val);
-        }
-      }
-    }
-    payload_len = cbor_output_(payload_buffer, resource);
-
-    if (payload_len == 0) {
-      SuccessOrExit(
-          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
-      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-      goto exit;
-    }
-    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
-    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
-    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-    SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  } else {
-    SuccessOrExit(
-        error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_METHOD_NOT_ALLOWED));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  }
-exit:
-  if (error != OT_ERROR_NONE) {
-    ESP_LOGE(TAG, "coap send response error %d: %s", error, otThreadErrorToString(error));
-    if (response != nullptr)
-      otMessageFree(response);
-  }
-}  // handle_number_request()
-#endif  // USE_NUMBER
-
-#ifdef USE_SWITCH
-// static handler
-void CoapServer::handle_switch_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_switch_request");
-  resource->server->handle_switch_request(resource, message, message_info);
-}
-
-void CoapServer::handle_switch_request(ehCoapResource *resource, otMessage *message,
-                                       const otMessageInfo *message_info) {
-  otError error = OT_ERROR_NONE;
-  otMessage *response = nullptr;
-  otInstance *instance = this->instance_;
-  uint8_t payload_buffer[COAP_PAYLOAD_MAX_SIZE];
-  size_t payload_len = 0;
-
-  this->touch_client_(*message_info);
-
-  response = otCoapNewMessage(instance, nullptr);
-  if (response == nullptr)
-    return;
-
-  if (otCoapMessageGetCode(message) == OT_COAP_CODE_GET) {
-    uint8_t observe = 3;
-    bool observe_option_present = false;
-    ehCoapObserver *observer = nullptr;
-    if (resource->observable) {
-      observe = this->observe_(message);
-      observe_option_present = (observe < 3);
-      observer = this->get_observer_(message, message_info);
-      ehCoapObserver *obs = nullptr;
-      if (observe_option_present && observer != nullptr && observe == 0) {
-        observe_option_present = false;
-      }
-      if (observe_option_present) {
-        if (observe == 0) {
-          bool is_con = (otCoapMessageGetType(message) == OT_COAP_TYPE_CONFIRMABLE);
-          if (this->get_subscription_confirm() != is_con) {
-            SuccessOrExit(
-                error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_BAD_REQUEST));
-            SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-            goto exit;
-          }
-          for (ehCoapObserver *stale = this->active_observers_; stale != nullptr; stale = stale->next) {
-            if (stale->resource == resource &&
-                otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
-              ESP_LOGD(TAG, "Replace stale observer from restarted client");
-              std::lock_guard<std::mutex> lock(this->lock_);
-              this->free_observer_(stale);
-              break;
-            }
-          }
-          ESP_LOGD(TAG, "Create Observer");
-          otCoapToken token;
-          SuccessOrExit(error = otCoapMessageReadToken(message, &token));
-          obs = this->new_observer_(resource, *message_info, token, otCoapMessageGetType(message));
-          bool client_known;
-          {
-            std::lock_guard<std::mutex> guard(this->lock_);
-            client_known = (this->find_client_(message_info->mPeerAddr, message_info->mPeerPort) != nullptr);
-          }
-          if (!client_known)
-            this->new_client_(*message_info);
-        } else if (observe == 1 && observer != nullptr) {
-          ESP_LOGD(TAG, "Cancel Observer");
-          std::lock_guard<std::mutex> lock(this->lock_);
-          this->free_observer_(observer);
-        }
-        if (obs != nullptr)
-          observer = obs;
-      }
-    }
-    payload_len = cbor_output_(payload_buffer, observer != nullptr ? observer->resource : resource);
-    if (payload_len == 0) {
-      SuccessOrExit(
-          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
-      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-      goto exit;
-    }
-    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
-    if (resource->observable && observer != nullptr && observe_option_present && observe == 0) {
-      SuccessOrExit(error = otCoapMessageAppendObserveOption(response, observer->observe_serial++));
-    }
-    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
-    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-    SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  } else if (otCoapMessageGetCode(message) == OT_COAP_CODE_POST) {
-    uint16_t msg_offset = otMessageGetOffset(message);
-    uint16_t msg_len = otMessageGetLength(message) - msg_offset;
-    if (msg_len > 0 && msg_len <= COAP_PAYLOAD_MAX_SIZE) {
-      uint8_t msg_buf[COAP_PAYLOAD_MAX_SIZE];
-      otMessageRead(message, msg_offset, msg_buf, msg_len);
-      CborParser parser;
-      CborValue root, map_val;
-      if (cbor_parser_init(msg_buf, msg_len, 0, &parser, &root) == CborNoError && cbor_value_is_map(&root) &&
-          cbor_value_enter_container(&root, &map_val) == CborNoError) {
-        while (!cbor_value_at_end(&map_val)) {
-          int key = 0;
-          bool key_ok = cbor_value_get_int(&map_val, &key) == CborNoError;
-          cbor_value_advance(&map_val);
-          if (cbor_value_at_end(&map_val))
-            break;
-          if (key_ok && key == 4 && cbor_value_is_boolean(&map_val)) {
-            bool val = false;
-            if (cbor_value_get_boolean(&map_val, &val) == CborNoError) {
-              auto *sw = static_cast<switch_::Switch *>(resource->entity);
-              if (resource->action == ACTIONTYPE_TOGGLE) {
-                if (val)
-                  sw->toggle();
-              } else {
-                if (val)
-                  sw->turn_on();
-                else
-                  sw->turn_off();
-              }
-            }
-            break;
-          }
-          cbor_value_advance(&map_val);
-        }
-      }
-    }
-    payload_len = cbor_output_(payload_buffer, resource);
-
-    if (payload_len == 0) {
-      SuccessOrExit(
-          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
-      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-      goto exit;
-    }
-    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
-    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
-    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-    SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  } else {
-    SuccessOrExit(
-        error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_METHOD_NOT_ALLOWED));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  }
-exit:
-  if (error != OT_ERROR_NONE) {
-    ESP_LOGE(TAG, "coap send response error %d: %s", error, otThreadErrorToString(error));
-    if (response != nullptr)
-      otMessageFree(response);
-  }
-}  // handle_switch_request()
-#endif  // USE_SWITCH
-
-#ifdef USE_LOCK
-// static handler
-void CoapServer::handle_lock_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_lock_request");
-  resource->server->handle_lock_request(resource, message, message_info);
-}
-
-void CoapServer::handle_lock_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info) {
-  otError error = OT_ERROR_NONE;
-  otMessage *response = nullptr;
-  otInstance *instance = this->instance_;
-  uint8_t payload_buffer[COAP_PAYLOAD_MAX_SIZE];
-  size_t payload_len = 0;
-
-  this->touch_client_(*message_info);
-
-  response = otCoapNewMessage(instance, nullptr);
-  if (response == nullptr)
-    return;
-
-  if (otCoapMessageGetCode(message) == OT_COAP_CODE_GET) {
-    uint8_t observe = 3;
-    bool observe_option_present = false;
-    ehCoapObserver *observer = nullptr;
-    if (resource->observable) {
-      observe = this->observe_(message);
-      observe_option_present = (observe < 3);
-      observer = this->get_observer_(message, message_info);
-      ehCoapObserver *obs = nullptr;
-      if (observe_option_present && observer != nullptr && observe == 0) {
-        observe_option_present = false;
-      }
-      if (observe_option_present) {
-        if (observe == 0) {
-          bool is_con = (otCoapMessageGetType(message) == OT_COAP_TYPE_CONFIRMABLE);
-          if (this->get_subscription_confirm() != is_con) {
-            SuccessOrExit(
-                error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_BAD_REQUEST));
-            SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-            goto exit;
-          }
-          for (ehCoapObserver *stale = this->active_observers_; stale != nullptr; stale = stale->next) {
-            if (stale->resource == resource &&
-                otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
-              ESP_LOGD(TAG, "Replace stale observer from restarted client");
-              std::lock_guard<std::mutex> lock(this->lock_);
-              this->free_observer_(stale);
-              break;
-            }
-          }
-          ESP_LOGD(TAG, "Create Observer");
-          otCoapToken token;
-          SuccessOrExit(error = otCoapMessageReadToken(message, &token));
-          obs = this->new_observer_(resource, *message_info, token, otCoapMessageGetType(message));
-          bool client_known;
-          {
-            std::lock_guard<std::mutex> guard(this->lock_);
-            client_known = (this->find_client_(message_info->mPeerAddr, message_info->mPeerPort) != nullptr);
-          }
-          if (!client_known)
-            this->new_client_(*message_info);
-        } else if (observe == 1 && observer != nullptr) {
-          ESP_LOGD(TAG, "Cancel Observer");
-          std::lock_guard<std::mutex> lock(this->lock_);
-          this->free_observer_(observer);
-        }
-        if (obs != nullptr)
-          observer = obs;
-      }
-    }
-    payload_len = cbor_output_(payload_buffer, observer != nullptr ? observer->resource : resource);
-    if (payload_len == 0) {
-      SuccessOrExit(
-          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
-      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-      goto exit;
-    }
-    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
-    if (resource->observable && observer != nullptr && observe_option_present && observe == 0) {
-      SuccessOrExit(error = otCoapMessageAppendObserveOption(response, observer->observe_serial++));
-    }
-    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
-    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-    SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  } else if (otCoapMessageGetCode(message) == OT_COAP_CODE_POST) {
-    uint16_t msg_offset = otMessageGetOffset(message);
-    uint16_t msg_len = otMessageGetLength(message) - msg_offset;
-    if (msg_len > 0 && msg_len <= COAP_PAYLOAD_MAX_SIZE) {
-      uint8_t msg_buf[COAP_PAYLOAD_MAX_SIZE];
-      otMessageRead(message, msg_offset, msg_buf, msg_len);
-      CborParser parser;
-      CborValue root, map_val;
-      if (cbor_parser_init(msg_buf, msg_len, 0, &parser, &root) == CborNoError && cbor_value_is_map(&root) &&
-          cbor_value_enter_container(&root, &map_val) == CborNoError) {
-        while (!cbor_value_at_end(&map_val)) {
-          int key = 0;
-          bool key_ok = cbor_value_get_int(&map_val, &key) == CborNoError;
-          cbor_value_advance(&map_val);
-          if (cbor_value_at_end(&map_val))
-            break;
-          if (key_ok && key == 4 && cbor_value_is_boolean(&map_val)) {
-            bool val = false;
-            if (cbor_value_get_boolean(&map_val, &val) == CborNoError) {
-              auto *lk = static_cast<lock::Lock *>(resource->entity);
-              if (val)
-                lk->lock();
-              else
-                lk->unlock();
-            }
-            break;
-          }
-          cbor_value_advance(&map_val);
-        }
-      }
-    }
-    payload_len = cbor_output_(payload_buffer, resource);
-
-    if (payload_len == 0) {
-      SuccessOrExit(
-          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
-      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-      goto exit;
-    }
-    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
-    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
-    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-    SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  } else {
-    SuccessOrExit(
-        error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_METHOD_NOT_ALLOWED));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  }
-exit:
-  if (error != OT_ERROR_NONE) {
-    ESP_LOGE(TAG, "coap send response error %d: %s", error, otThreadErrorToString(error));
-    if (response != nullptr)
-      otMessageFree(response);
-  }
-}  // handle_lock_request()
-#endif  // USE_LOCK
-
-#ifdef USE_VALVE
-// static handler
-void CoapServer::handle_valve_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_valve_request");
-  resource->server->handle_valve_request(resource, message, message_info);
-}
-
-void CoapServer::handle_valve_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info) {
-  otError error = OT_ERROR_NONE;
-  otMessage *response = nullptr;
-  otInstance *instance = this->instance_;
-  uint8_t payload_buffer[COAP_PAYLOAD_MAX_SIZE];
-  size_t payload_len = 0;
-
-  this->touch_client_(*message_info);
-
-  response = otCoapNewMessage(instance, nullptr);
-  if (response == nullptr)
-    return;
-
-  if (otCoapMessageGetCode(message) == OT_COAP_CODE_GET) {
-    uint8_t observe = 3;
-    bool observe_option_present = false;
-    ehCoapObserver *observer = nullptr;
-    if (resource->observable) {
-      observe = this->observe_(message);
-      observe_option_present = (observe < 3);
-      observer = this->get_observer_(message, message_info);
-      ehCoapObserver *obs = nullptr;
-      if (observe_option_present && observer != nullptr && observe == 0) {
-        observe_option_present = false;
-      }
-      if (observe_option_present) {
-        if (observe == 0) {
-          bool is_con = (otCoapMessageGetType(message) == OT_COAP_TYPE_CONFIRMABLE);
-          if (this->get_subscription_confirm() != is_con) {
-            SuccessOrExit(
-                error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_BAD_REQUEST));
-            SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-            goto exit;
-          }
-          for (ehCoapObserver *stale = this->active_observers_; stale != nullptr; stale = stale->next) {
-            if (stale->resource == resource &&
-                otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
-              ESP_LOGD(TAG, "Replace stale observer from restarted client");
-              std::lock_guard<std::mutex> lock(this->lock_);
-              this->free_observer_(stale);
-              break;
-            }
-          }
-          ESP_LOGD(TAG, "Create Observer");
-          otCoapToken token;
-          SuccessOrExit(error = otCoapMessageReadToken(message, &token));
-          obs = this->new_observer_(resource, *message_info, token, otCoapMessageGetType(message));
-          bool client_known;
-          {
-            std::lock_guard<std::mutex> guard(this->lock_);
-            client_known = (this->find_client_(message_info->mPeerAddr, message_info->mPeerPort) != nullptr);
-          }
-          if (!client_known)
-            this->new_client_(*message_info);
-        } else if (observe == 1 && observer != nullptr) {
-          ESP_LOGD(TAG, "Cancel Observer");
-          std::lock_guard<std::mutex> lock(this->lock_);
-          this->free_observer_(observer);
-        }
-        if (obs != nullptr)
-          observer = obs;
-      }
-    }
-    payload_len = cbor_output_(payload_buffer, observer != nullptr ? observer->resource : resource);
-    if (payload_len == 0) {
-      SuccessOrExit(
-          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
-      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-      goto exit;
-    }
-    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
-    if (resource->observable && observer != nullptr && observe_option_present && observe == 0) {
-      SuccessOrExit(error = otCoapMessageAppendObserveOption(response, observer->observe_serial++));
-    }
-    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
-    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-    SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  } else if (otCoapMessageGetCode(message) == OT_COAP_CODE_POST) {
-    uint16_t msg_offset = otMessageGetOffset(message);
-    uint16_t msg_len = otMessageGetLength(message) - msg_offset;
-    if (msg_len > 0 && msg_len <= COAP_PAYLOAD_MAX_SIZE) {
-      uint8_t msg_buf[COAP_PAYLOAD_MAX_SIZE];
-      otMessageRead(message, msg_offset, msg_buf, msg_len);
-      CborParser parser;
-      CborValue root, map_val;
-      if (cbor_parser_init(msg_buf, msg_len, 0, &parser, &root) == CborNoError && cbor_value_is_map(&root) &&
-          cbor_value_enter_container(&root, &map_val) == CborNoError) {
-        while (!cbor_value_at_end(&map_val)) {
-          int key = 0;
-          bool key_ok = cbor_value_get_int(&map_val, &key) == CborNoError;
-          cbor_value_advance(&map_val);
-          if (cbor_value_at_end(&map_val))
-            break;
-          if (key_ok && key == 4 && cbor_value_is_boolean(&map_val)) {
-            bool val = false;
-            if (cbor_value_get_boolean(&map_val, &val) == CborNoError) {
-              auto *vv = static_cast<valve::Valve *>(resource->entity);
-              if (resource->action == ACTIONTYPE_STOP) {
-                if (val)
-                  vv->make_call().set_command_stop().perform();
-              } else {
-                if (val)
-                  vv->make_call().set_command_open().perform();
-                else
-                  vv->make_call().set_command_close().perform();
-              }
-            }
-            break;
-          }
-          cbor_value_advance(&map_val);
-        }
-      }
-    }
-    payload_len = cbor_output_(payload_buffer, resource);
-
-    if (payload_len == 0) {
-      SuccessOrExit(
-          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
-      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-      goto exit;
-    }
-    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
-    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
-    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-    SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  } else {
-    SuccessOrExit(
-        error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_METHOD_NOT_ALLOWED));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  }
-exit:
-  if (error != OT_ERROR_NONE) {
-    ESP_LOGE(TAG, "coap send response error %d: %s", error, otThreadErrorToString(error));
-    if (response != nullptr)
-      otMessageFree(response);
-  }
-}  // handle_valve_request()
-#endif  // USE_VALVE
 
 // static handler
 void CoapServer::handle_info_request(void *context, otMessage *message, const otMessageInfo *message_info) {
@@ -1499,33 +1076,51 @@ void CoapServer::add_coap_resource_(EntityType type, EntityBase *entity, bool ob
 #endif
   resource->type = type;
   resource->mUriPath = resource->path;
+
+  switch (type) {
+#ifdef USE_SENSOR
+    case EntityType::ENTITYTYPE_SENSOR:
+      resource->mHandler = &CoapServer::handle_sensor_request;
+      break;
+#endif  // USE_SENSOR
 #ifdef USE_SWITCH
-  if (type == ENTITYTYPE_SWITCH) {
-    resource->mHandler = &CoapServer::handle_switch_request;
-  } else
-#endif
-#ifdef USE_LOCK
-      if (type == ENTITYTYPE_LOCK) {
-    resource->mHandler = &CoapServer::handle_lock_request;
-  } else
-#endif
-#ifdef USE_VALVE
-      if (type == ENTITYTYPE_VALVE) {
-    resource->mHandler = &CoapServer::handle_valve_request;
-  } else
-#endif
+    case EntityType::ENTITYTYPE_SWITCH:
+      resource->mHandler = &CoapServer::handle_switch_request;
+      break;
+#endif  // USE_SWITCH
+#ifdef USE_BINARY_SENSOR
+    case EntityType::ENTITYTYPE_BINARY_SENSOR:
+      resource->mHandler = &CoapServer::handle_binary_sensor_request;
+      break;
+#endif  // USE_BINARY_SENSOR
 #ifdef USE_BUTTON
-      if (type == ENTITYTYPE_BUTTON) {
-    resource->mHandler = &CoapServer::handle_button_request;
-  } else
-#endif
+    case EntityType::ENTITYTYPE_BUTTON:
+      resource->mHandler = &CoapServer::handle_button_request;
+      break;
+#endif  // USE_BUTTON
+#ifdef USE_TEXT_SENSOR
+    case EntityType::ENTITYTYPE_TEXT_SENSOR:
+      resource->mHandler = &CoapServer::handle_text_sensor_request;
+      break;
+#endif  // USE_TEXT_SENSOR
 #ifdef USE_NUMBER
-      if (type == ENTITYTYPE_NUMBER) {
-    resource->mHandler = &CoapServer::handle_number_request;
-  } else
-#endif
-  {
-    resource->mHandler = &CoapServer::handle_state_request;
+    case EntityType::ENTITYTYPE_NUMBER:
+      resource->mHandler = &CoapServer::handle_number_request;
+      break;
+#endif  // USE_NUMBER
+#ifdef USE_LOCK
+    case EntityType::ENTITYTYPE_LOCK:
+      resource->mHandler = &CoapServer::handle_lock_request;
+      break;
+#endif  // USE_LOCK
+#ifdef USE_VALVE
+    case EntityType::ENTITYTYPE_VALVE:
+      resource->mHandler = &CoapServer::handle_valve_request;
+      break;
+#endif  // USE_VALVE
+    case EntityType::ENTITYTYPE_UNKNOWN:
+    default:
+      resource->mHandler = &CoapServer::handle_unknown_request;
   }
   resource->mContext = resource;
   otCoapAddResource(this->instance_, resource);
