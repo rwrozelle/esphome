@@ -15,6 +15,7 @@ import esphome.final_validate as fv
 
 from .const import (
     CONF_CLIENT_PING_INTERVAL,
+    CONF_CLIENT_PING_RETRY,
     CONF_CLIENT_PING_TIMEOUT_RATIO,
     CONF_ID_CONTEXT,
     CONF_MASTER_SALT,
@@ -23,6 +24,7 @@ from .const import (
     CONF_RECIPIENT_ID,
     CONF_SENDER_ID,
     CONF_SERVER_PING_INTERVAL,
+    CONF_SERVER_PING_RETRY,
     CONF_SERVER_PING_TIMEOUT_RATIO,
     CONF_SUBSCRIPTION_CONFIRM,
 )
@@ -92,7 +94,7 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(CoapServer),
-            cv.Optional(CONF_PORT, default="5683"): cv.uint16_t,
+            cv.Optional(CONF_PORT, default=5683): cv.uint16_t,
             # Sent to Client in /info so they know how often to check if Server is alive
             cv.Optional(CONF_SERVER_PING_INTERVAL, default="60s"): cv.All(
                 cv.positive_time_period_milliseconds,
@@ -101,6 +103,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_SERVER_PING_TIMEOUT_RATIO, default=2.5): cv.All(
                 cv.float_, cv.Range(min=0.5, max=5.0)
             ),
+            cv.Optional(CONF_SERVER_PING_RETRY, default=1): cv.int_range(min=1, max=5),
             # Used by Server to check if client is still alive
             cv.Optional(CONF_CLIENT_PING_INTERVAL, default="60s"): cv.All(
                 cv.positive_time_period_milliseconds,
@@ -109,6 +112,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_CLIENT_PING_TIMEOUT_RATIO, default=2.5): cv.All(
                 cv.float_, cv.Range(min=0.5, max=5.0)
             ),
+            cv.Optional(CONF_CLIENT_PING_RETRY, default=1): cv.int_range(min=1, max=5),
             # Maximum allowed active connections, list is used for checking aliveness
             # does not block additional client from doing calls that don't involve observation
             cv.Optional(CONF_MAX_CONNECTIONS, default=1): cv.int_range(min=1, max=5),
@@ -147,18 +151,22 @@ async def to_code(config):
 
     cg.add(var.set_server_ping_interval(config[CONF_SERVER_PING_INTERVAL]))
     cg.add(var.set_server_ping_timeout_ratio(config[CONF_SERVER_PING_TIMEOUT_RATIO]))
+    cg.add(var.set_server_ping_retry(config[CONF_SERVER_PING_RETRY]))
     cg.add(var.set_client_ping_interval(config[CONF_CLIENT_PING_INTERVAL]))
     cg.add(var.set_client_ping_timeout_ratio(config[CONF_CLIENT_PING_TIMEOUT_RATIO]))
+    cg.add(var.set_client_ping_retry(config[CONF_CLIENT_PING_RETRY]))
     cg.add_define("USE_COAP_SERVER_MAX_CLIENTS", config[CONF_MAX_CONNECTIONS])
     if CONF_ON_CLIENT_CONNECTED in config:
-        await automation.build_automation(
-            var.get_client_connected_trigger(),
+        await automation.build_callback_automation(
+            var,
+            "add_on_client_connected_callback",
             [(cg.std_string, "client_address")],
             config[CONF_ON_CLIENT_CONNECTED],
         )
     if CONF_ON_CLIENT_DISCONNECTED in config:
-        await automation.build_automation(
-            var.get_client_disconnected_trigger(),
+        await automation.build_callback_automation(
+            var,
+            "add_on_client_disconnected_callback",
             [(cg.std_string, "client_address")],
             config[CONF_ON_CLIENT_DISCONNECTED],
         )

@@ -1,6 +1,5 @@
 #pragma once
 #include "esphome/core/defines.h"
-#include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/controller.h"
 #include "esphome/core/entity_base.h"
@@ -9,28 +8,10 @@
 
 #ifdef USE_OPENTHREAD
 #include <openthread/coap.h>
-#endif  // USE_OPENTHREAD
 #include <array>
 #include <mutex>
 #include <vector>
-
-#ifndef SuccessOrExit
-#define SuccessOrExit(aStatus) \
-  do { \
-    if ((aStatus) != 0) { \
-      goto exit; \
-    } \
-  } while (false)
-#endif
-
-#ifndef CBOR_CHECK
-#define CBOR_CHECK(expr) \
-  do { \
-    CborError cbor_err_ = (expr); \
-    if (cbor_err_ != CborNoError) \
-      return cbor_err_; \
-  } while (0)
-#endif
+#endif  // USE_OPENTHREAD
 
 namespace esphome::coap_server {
 
@@ -49,6 +30,7 @@ enum EntityType : uint8_t {
   ENTITYTYPE_NUMBER = 7,
   ENTITYTYPE_LOCK = 8,
   ENTITYTYPE_VALVE = 9,
+  ENTITYTYPE_LOG = 10,
 };
 
 enum ActionType : uint8_t {
@@ -88,6 +70,7 @@ struct ehCoapClient {
   uint32_t last_ping_sent_ms{0};
   uint32_t last_response_ms{0};
   uint8_t slot{0};
+  uint8_t ping_miss_count{0};
   bool has_non_observer{false};
   bool boot_notified{false};
 };
@@ -112,18 +95,26 @@ class CoapServer final : public Component, public Controller {
   bool teardown() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
-  Trigger<std::string> *get_client_connected_trigger() { return &this->client_connected_trigger_; }
-  Trigger<std::string> *get_client_disconnected_trigger() { return &this->client_disconnected_trigger_; }
+  template<typename F> void add_on_client_connected_callback(F &&f) {
+    this->client_connected_callback_.add(std::forward<F>(f));
+  }
+  template<typename F> void add_on_client_disconnected_callback(F &&f) {
+    this->client_disconnected_callback_.add(std::forward<F>(f));
+  }
   uint8_t get_active_client_count() const { return this->active_client_count_; }
 
   void set_server_ping_interval(uint32_t interval_ms) { this->server_ping_interval_ms_ = interval_ms; }
   uint32_t get_server_ping_interval() const { return this->server_ping_interval_ms_; }
   void set_server_ping_timeout_ratio(float ratio) { this->server_ping_timeout_ratio_ = ratio; }
   float get_server_ping_timeout_ratio() const { return this->server_ping_timeout_ratio_; }
+  void set_server_ping_retry(uint8_t retry) { this->server_ping_retry_ = retry; }
+  uint8_t get_server_ping_retry() const { return this->server_ping_retry_; }
   void set_client_ping_interval(uint32_t interval_ms) { this->client_ping_interval_ms_ = interval_ms; }
   uint32_t get_client_ping_interval() const { return this->client_ping_interval_ms_; }
   void set_client_ping_timeout_ratio(float ratio) { this->client_ping_timeout_ratio_ = ratio; }
   float get_client_ping_timeout_ratio() const { return this->client_ping_timeout_ratio_; }
+  void set_client_ping_retry(uint8_t retry) { this->client_ping_retry_ = retry; }
+  uint8_t get_client_ping_retry() const { return this->client_ping_retry_; }
   void set_subscription_confirm(bool confirm) { this->subscription_confirm_ = confirm; }
   bool get_subscription_confirm() const { return this->subscription_confirm_; }
 
@@ -133,38 +124,17 @@ class CoapServer final : public Component, public Controller {
                                       otError error);
   static void handle_info_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
   static void handle_ping_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  static void handle_unknown_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  void handle_component_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info,
-                                const EntityType type);
+  static void handle_entity_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
+  void handle_entity_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info,
+                             const EntityType type);
 
-#ifdef USE_BINARY_SENSOR
-  static void handle_binary_sensor_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-#endif
 #ifdef USE_BUTTON
   static void handle_button_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
   void handle_button_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info);
 #endif
-#ifdef USE_LOCK
-  static void handle_lock_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-#endif
 #ifdef USE_LOGGER
   static void handle_logs_request(void *context, otMessage *message, const otMessageInfo *message_info);
 #endif  // USE_LOGGER
-#ifdef USE_NUMBER
-  static void handle_number_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-#endif
-#ifdef USE_SENSOR
-  static void handle_sensor_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-#endif
-#ifdef USE_SWITCH
-  static void handle_switch_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-#endif
-#ifdef USE_TEXT_SENSOR
-  static void handle_text_sensor_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-#endif
-#ifdef USE_VALVE
-  static void handle_valve_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-#endif
 
   void shrink_observers();
   void republish_all();
@@ -201,50 +171,23 @@ class CoapServer final : public Component, public Controller {
 #endif  // USE_COAP_OSCORE
 
  protected:
-  Trigger<std::string> client_connected_trigger_;
-  Trigger<std::string> client_disconnected_trigger_;
+  LazyCallbackManager<void(std::string)> client_connected_callback_;
+  LazyCallbackManager<void(std::string)> client_disconnected_callback_;
   uint8_t active_client_count_{0};
   uint32_t server_ping_interval_ms_{60000};
   float server_ping_timeout_ratio_{2.5f};
+  uint8_t server_ping_retry_{1};
   uint32_t client_ping_interval_ms_{60000};
   float client_ping_timeout_ratio_{2.5f};
+  uint8_t client_ping_retry_{1};
   bool subscription_confirm_{false};
-
-#ifdef USE_BINARY_SENSOR
-  size_t cbor_output_(uint8_t *buffer, binary_sensor::BinarySensor *entity);
-#endif  // USE_BINARY_SENSOR
-
-#ifdef USE_LOCK
-  size_t cbor_output_(uint8_t *buffer, lock::Lock *entity);
-#endif  // USE_LOCK
-
-#ifdef USE_NUMBER
-  size_t cbor_output_(uint8_t *buffer, number::Number *entity);
-#endif  // USE_NUMBER
-
-#ifdef USE_SENSOR
-  size_t cbor_output_(uint8_t *buffer, sensor::Sensor *entity);
-#endif  // USE_SENSOR
-
-#ifdef USE_SWITCH
-  size_t cbor_output_(uint8_t *buffer, switch_::Switch *entity);
-#endif  // USE_SWITCH
-
-#ifdef USE_TEXT_SENSOR
-  size_t cbor_output_(uint8_t *buffer, text_sensor::TextSensor *entity);
-#endif  // USE_TEXT_SENSOR
-
-#ifdef USE_VALVE
-  size_t cbor_output_(uint8_t *buffer, valve::Valve *entity);
-#endif  // USE_VALVE
-
-  size_t cbor_output_(uint8_t *buffer, EntityBase *entity);
 
   static size_t encode_device_info_(uint8_t *buf, size_t buf_len, CoapServer *server);
 
 #ifdef USE_OPENTHREAD
   void add_coap_resource_(EntityType type, EntityBase *entity, bool observable, uint16_t &senml_index);
   size_t cbor_output_(uint8_t *buffer, ehCoapResource *resource);
+  void notify_observers_(ehCoapResource *resource, const uint8_t *payload, size_t payload_len);
   void handle_observer_(ehCoapObserver *observer, ehCoapResource *expected_resource, const uint8_t *payload,
                         size_t payload_len);
   ehCoapClient *new_client_(const otMessageInfo &message_info);
@@ -265,7 +208,7 @@ class CoapServer final : public Component, public Controller {
   static void log_callback_(void *self, uint8_t level, const char *tag, const char *message, size_t message_len);
   void on_log_(uint8_t level, const char *tag, const char *message, size_t message_len);
 
-  ehCoapResource logs_resource_{};
+  ehCoapResource *logs_resource_{nullptr};
   static constexpr size_t LOG_BUF_SIZE = 1024;
   uint8_t log_buf_[LOG_BUF_SIZE];
   size_t log_buf_pos_{1};  // position 0 is always 0x9F (CBOR indefinite array start)

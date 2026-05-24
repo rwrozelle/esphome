@@ -6,6 +6,15 @@
 #include "esphome/components/openthread/openthread.h"
 #include "cbor.h"
 #include <openthread/ip6.h>
+
+#ifndef SuccessOrExit
+#define SuccessOrExit(aStatus) \
+  do { \
+    if ((aStatus) != 0) { \
+      goto exit; \
+    } \
+  } while (false)
+#endif
 #ifdef USE_COAP_OSCORE
 #include <mbedtls/hkdf.h>
 #include "nvs.h"
@@ -52,6 +61,9 @@ void CoapServer::setup() {
   // .well-known/core + info + 1 per sensor + 2 per switch (state + toggle) + 1 per binary sensor + 1 per button
   // + 1 per text_sensor + 1 per number + 1 per lock + 2 per valve (state + stop)
   size_t resource_count = 2;
+#ifdef USE_LOGGER
+  resource_count++;
+#endif
 #ifdef USE_BINARY_SENSOR
   for (binary_sensor::BinarySensor *entity : App.get_binary_sensors()) {
     if (!entity->is_internal())
@@ -152,27 +164,6 @@ void CoapServer::setup() {
   otCoapAddResource(instance, &this->ping_resource_);
   ESP_LOGD(TAG, "Add CoAP Server Resource: /%s", this->ping_resource_.mUriPath);
 
-#ifdef USE_LOGGER
-  // Configure the /logs resource (not in resources_ so it is excluded from .well-known/core)
-  this->logs_resource_.server = this;
-  this->logs_resource_.observable = true;
-  strncpy(this->logs_resource_.path, "logs", sizeof(this->logs_resource_.path));
-  this->logs_resource_.mUriPath = this->logs_resource_.path;
-  this->logs_resource_.mHandler = &CoapServer::handle_logs_request;
-  this->logs_resource_.mContext = &this->logs_resource_;
-  otCoapAddResource(instance, &this->logs_resource_);
-  ESP_LOGD(TAG, "Add CoAP Server Resource: /%s", this->logs_resource_.mUriPath);
-
-  this->log_buf_[0] = 0x9F;  // CBOR indefinite-length array start
-  this->log_buf_pos_ = 1;
-
-  {}
-  if (logger::global_logger != nullptr)
-    logger::global_logger->add_log_callback(this, CoapServer::log_callback_);
-  uint32_t flush_ms = std::max(otLinkGetPollPeriod(instance), (uint32_t) 1000);
-  this->set_timeout("log_flush", flush_ms, [this]() { this->flush_logs_(); });
-#endif  // USE_LOGGER
-
   // Add Component Resources in alphabetical order by rt (domain) so that
   // senml indices are assigned alphabetically.
   uint16_t senml_index = 1;
@@ -232,6 +223,16 @@ void CoapServer::setup() {
     add_coap_resource_(EntityType::ENTITYTYPE_VALVE, entity, true, senml_index);
   }
 #endif  // USE_VALVE
+#ifdef USE_LOGGER
+  add_coap_resource_(EntityType::ENTITYTYPE_LOG, nullptr, true, senml_index);
+  this->logs_resource_ = &(this->resources_[this->resources_.size() - 1]);
+  this->log_buf_[0] = 0x9F;  // CBOR indefinite-length array start
+  this->log_buf_pos_ = 1;
+  if (logger::global_logger != nullptr)
+    logger::global_logger->add_log_callback(this, CoapServer::log_callback_);
+  uint32_t flush_ms = std::max(otLinkGetPollPeriod(instance), (uint32_t) 1000);
+  this->set_timeout("log_flush", flush_ms, [this]() { this->flush_logs_(); });
+#endif  // USE_LOGGER
 
 }  // setup()
 
@@ -256,9 +257,6 @@ bool CoapServer::teardown() {
   for (auto &res : this->resources_)
     otCoapRemoveResource(instance, &res);
   otCoapRemoveResource(instance, &this->ping_resource_);
-#ifdef USE_LOGGER
-  otCoapRemoveResource(instance, &this->logs_resource_);
-#endif  // USE_LOGGER
   otCoapStop(instance);
   return true;
 }  // teardown()
@@ -298,6 +296,12 @@ static uint16_t format_link_entry(char *buf, size_t buf_len, const ehCoapResourc
     put(";rt=\"esphome.device\";if=\"if.a\";ct=60", sizeof(";rt=\"esphome.device\";if=\"if.a\";ct=60") - 1);
     return static_cast<uint16_t>(p - buf);
   }
+#ifdef USE_LOGGER
+  if (res.type == ENTITYTYPE_LOG) {
+    put(";rt=\"esphome.log\";if=\"if.s\";ct=112;obs", sizeof(";rt=\"esphome.log\";if=\"if.s\";ct=112;obs") - 1);
+    return static_cast<uint16_t>(p - buf);
+  }
+#endif
   if (res.action != ACTIONTYPE_NO_ACTION) {
     put(";rt=\"esphome.action\";if=\"if.a\";ct=112", sizeof(";rt=\"esphome.action\";if=\"if.a\";ct=112") - 1);
     const char *action_title;
@@ -453,8 +457,8 @@ void CoapServer::handle_notification_ack(void *context, otMessage *message, cons
   }
 }
 
-void CoapServer::handle_component_request(ehCoapResource *resource, otMessage *message,
-                                          const otMessageInfo *message_info, const EntityType type) {
+void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info,
+                                       const EntityType type) {
   otError error = OT_ERROR_NONE;
   otMessage *response = nullptr;
   otInstance *instance = this->instance_;
@@ -494,13 +498,15 @@ void CoapServer::handle_component_request(ehCoapResource *resource, otMessage *m
             SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
             goto exit;
           }
-          for (ehCoapObserver *stale = this->active_observers_; stale != nullptr; stale = stale->next) {
-            if (stale->resource == resource &&
-                otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
-              ESP_LOGD(TAG, "Replace stale observer from restarted client");
-              std::lock_guard<std::mutex> lock(this->lock_);
-              this->free_observer_(stale);
-              break;
+          {
+            std::lock_guard<std::mutex> lock(this->lock_);
+            for (ehCoapObserver *stale = this->active_observers_; stale != nullptr; stale = stale->next) {
+              if (stale->resource == resource &&
+                  otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
+                ESP_LOGD(TAG, "Replace stale observer from restarted client");
+                this->free_observer_(stale);
+                break;
+              }
             }
           }
           ESP_LOGD(TAG, "Create Observer");
@@ -636,9 +642,8 @@ void CoapServer::handle_component_request(ehCoapResource *resource, otMessage *m
             default:
               ESP_LOGW(TAG, "Unknown Type, no action performed");
           }
-          break;
+          cbor_value_advance(&map_val);
         }
-        cbor_value_advance(&map_val);
       }
     }
     payload_len = cbor_output_(payload_buffer, resource);
@@ -665,77 +670,13 @@ exit:
     if (response != nullptr)
       otMessageFree(response);
   }
-}  // handle_component_request()
+}  // handle_entity_request()
 
-// static handler
-void CoapServer::handle_unknown_request(void *context, otMessage *message, const otMessageInfo *message_info) {
+// static handler for all entity types except button
+void CoapServer::handle_entity_request(void *context, otMessage *message, const otMessageInfo *message_info) {
   ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_binary_sensor_request");
-  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_UNKNOWN);
+  resource->server->handle_entity_request(resource, message, message_info, resource->type);
 }
-
-// static handler
-#ifdef USE_BINARY_SENSOR
-void CoapServer::handle_binary_sensor_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_binary_sensor_request");
-  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_BINARY_SENSOR);
-}
-#endif
-
-#ifdef USE_LOCK
-// static handler
-void CoapServer::handle_lock_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_lock_request");
-  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_LOCK);
-}
-#endif
-
-#ifdef USE_NUMBER
-// static handler
-void CoapServer::handle_number_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_number_request");
-  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_NUMBER);
-}
-#endif
-
-// static handler
-#ifdef USE_SENSOR
-void CoapServer::handle_sensor_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_sensor_request");
-  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_SENSOR);
-}
-#endif
-
-#ifdef USE_SWITCH
-// static handler
-void CoapServer::handle_switch_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_switch_request");
-  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_SWITCH);
-}
-#endif
-
-// static handler
-#ifdef USE_TEXT_SENSOR
-void CoapServer::handle_text_sensor_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_text_sensor_request");
-  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_TEXT_SENSOR);
-}
-#endif
-
-#ifdef USE_VALVE
-// static handler
-void CoapServer::handle_valve_request(void *context, otMessage *message, const otMessageInfo *message_info) {
-  ehCoapResource *resource = static_cast<ehCoapResource *>(context);
-  ESP_LOGV(TAG, "handle_valve_request");
-  resource->server->handle_component_request(resource, message, message_info, ENTITYTYPE_VALVE);
-}
-#endif
 
 #ifdef USE_BUTTON
 // static handler
@@ -831,6 +772,7 @@ void CoapServer::handle_ping_request(void *context, otMessage *message, const ot
     ehCoapClient *client = self->find_client_(message_info->mPeerAddr, message_info->mPeerPort);
     if (client != nullptr) {
       client->last_response_ms = millis();
+      client->ping_miss_count = 0;
       if (!client->boot_notified) {
         client->boot_notified = true;
         boot_signal = true;
@@ -1039,6 +981,11 @@ void CoapServer::add_coap_resource_(EntityType type, EntityBase *entity, bool ob
       set_domain(resource->domain, "valve");
       break;
 #endif  // USE_VALVE
+#ifdef USE_LOGGER
+    case EntityType::ENTITYTYPE_LOG:
+      set_domain(resource->domain, "log");
+      break;
+#endif  // USE_LOGGER
     case EntityType::ENTITYTYPE_UNKNOWN:
     default:
       set_domain(resource->domain, "unknown");
@@ -1051,7 +998,7 @@ void CoapServer::add_coap_resource_(EntityType type, EntityBase *entity, bool ob
     append_uint16_decimal(resource->path, pos, senml_index++);
     if (type == ENTITYTYPE_SENSOR || type == ENTITYTYPE_BINARY_SENSOR || type == ENTITYTYPE_TEXT_SENSOR ||
         type == ENTITYTYPE_SWITCH || type == ENTITYTYPE_BUTTON || type == ENTITYTYPE_NUMBER ||
-        type == ENTITYTYPE_LOCK || type == ENTITYTYPE_VALVE) {
+        type == ENTITYTYPE_LOCK || type == ENTITYTYPE_VALVE || type == ENTITYTYPE_LOG) {
       resource->path[pos++] = '/';
       resource->path[pos++] = 'g';
       resource->path[pos++] = '/';
@@ -1063,7 +1010,7 @@ void CoapServer::add_coap_resource_(EntityType type, EntityBase *entity, bool ob
   resource->observable = observable;
   resource->entity = entity;
 #ifdef USE_DEVICES
-  if (entity->get_device_id() != 0) {
+  if (entity != nullptr && entity->get_device_id() != 0) {
     uint8_t dev_idx = 1;
     for (Device *dev : App.get_devices()) {
       if (dev->get_device_id() == entity->get_device_id()) {
@@ -1077,51 +1024,15 @@ void CoapServer::add_coap_resource_(EntityType type, EntityBase *entity, bool ob
   resource->type = type;
   resource->mUriPath = resource->path;
 
-  switch (type) {
-#ifdef USE_SENSOR
-    case EntityType::ENTITYTYPE_SENSOR:
-      resource->mHandler = &CoapServer::handle_sensor_request;
-      break;
-#endif  // USE_SENSOR
-#ifdef USE_SWITCH
-    case EntityType::ENTITYTYPE_SWITCH:
-      resource->mHandler = &CoapServer::handle_switch_request;
-      break;
-#endif  // USE_SWITCH
-#ifdef USE_BINARY_SENSOR
-    case EntityType::ENTITYTYPE_BINARY_SENSOR:
-      resource->mHandler = &CoapServer::handle_binary_sensor_request;
-      break;
-#endif  // USE_BINARY_SENSOR
+  resource->mHandler = &CoapServer::handle_entity_request;
 #ifdef USE_BUTTON
-    case EntityType::ENTITYTYPE_BUTTON:
-      resource->mHandler = &CoapServer::handle_button_request;
-      break;
-#endif  // USE_BUTTON
-#ifdef USE_TEXT_SENSOR
-    case EntityType::ENTITYTYPE_TEXT_SENSOR:
-      resource->mHandler = &CoapServer::handle_text_sensor_request;
-      break;
-#endif  // USE_TEXT_SENSOR
-#ifdef USE_NUMBER
-    case EntityType::ENTITYTYPE_NUMBER:
-      resource->mHandler = &CoapServer::handle_number_request;
-      break;
-#endif  // USE_NUMBER
-#ifdef USE_LOCK
-    case EntityType::ENTITYTYPE_LOCK:
-      resource->mHandler = &CoapServer::handle_lock_request;
-      break;
-#endif  // USE_LOCK
-#ifdef USE_VALVE
-    case EntityType::ENTITYTYPE_VALVE:
-      resource->mHandler = &CoapServer::handle_valve_request;
-      break;
-#endif  // USE_VALVE
-    case EntityType::ENTITYTYPE_UNKNOWN:
-    default:
-      resource->mHandler = &CoapServer::handle_unknown_request;
-  }
+  if (type == ENTITYTYPE_BUTTON)
+    resource->mHandler = &CoapServer::handle_button_request;
+#endif
+#ifdef USE_LOGGER
+  if (type == ENTITYTYPE_LOG)
+    resource->mHandler = &CoapServer::handle_logs_request;
+#endif
   resource->mContext = resource;
   otCoapAddResource(this->instance_, resource);
   ESP_LOGD(TAG, "Add CoAP Server Resource: /%s", resource->mUriPath);
@@ -1139,7 +1050,7 @@ void CoapServer::add_coap_resource_(EntityType type, EntityBase *entity, bool ob
     toggle_resource->type = type;
     toggle_resource->action = ACTIONTYPE_TOGGLE;
     toggle_resource->mUriPath = toggle_resource->path;
-    toggle_resource->mHandler = &CoapServer::handle_switch_request;
+    toggle_resource->mHandler = &CoapServer::handle_entity_request;
     toggle_resource->mContext = toggle_resource;
     strncpy(toggle_resource->domain, resource->domain, sizeof(toggle_resource->domain));
     otCoapAddResource(this->instance_, toggle_resource);
@@ -1159,7 +1070,7 @@ void CoapServer::add_coap_resource_(EntityType type, EntityBase *entity, bool ob
     stop_resource->type = type;
     stop_resource->action = ACTIONTYPE_STOP;
     stop_resource->mUriPath = stop_resource->path;
-    stop_resource->mHandler = &CoapServer::handle_valve_request;
+    stop_resource->mHandler = &CoapServer::handle_entity_request;
     stop_resource->mContext = stop_resource;
     strncpy(stop_resource->domain, resource->domain, sizeof(stop_resource->domain));
     otCoapAddResource(this->instance_, stop_resource);
@@ -1244,6 +1155,7 @@ ehCoapClient *CoapServer::new_client_(const otMessageInfo &message_info) {
         client.active = true;
         client.last_ping_sent_ms = 0;
         client.last_response_ms = millis();
+        client.ping_miss_count = 0;
         client.has_non_observer = false;
         client.boot_notified = false;
         client.slot = i;
@@ -1267,7 +1179,7 @@ ehCoapClient *CoapServer::new_client_(const otMessageInfo &message_info) {
   if (result != nullptr) {
     char addr_str[OT_IP6_ADDRESS_STRING_SIZE];
     otIp6AddressToString(&result->peer_addr, addr_str, sizeof(addr_str));
-    this->client_connected_trigger_.trigger(std::string(addr_str));
+    this->client_connected_callback_(std::string(addr_str));
     this->ping_client_(result);
   }
   return result;
@@ -1283,18 +1195,23 @@ void CoapServer::ping_client_(ehCoapClient *client) {
     uint32_t now = millis();
     bool timed_out = false;
     bool client_recently_active = false;
+    uint8_t ping_miss_count = 0;
     {
       std::lock_guard<std::mutex> guard(this->lock_);
       if (client->last_ping_sent_ms != 0) {
         uint32_t timeout_ms = (uint32_t) (this->client_ping_interval_ms_ * this->client_ping_timeout_ratio_);
         timed_out = (now - client->last_response_ms > timeout_ms);
+        if (timed_out)
+          ping_miss_count = ++client->ping_miss_count;
       }
       client_recently_active = (now - client->last_response_ms < this->client_ping_interval_ms_);
     }
     if (timed_out) {
-      ESP_LOGI(TAG, "Client ping timeout, freeing client slot %u", client->slot);
-      this->free_client_(client);
-      return;
+      if (ping_miss_count >= this->client_ping_retry_) {
+        ESP_LOGI(TAG, "Client ping timeout, freeing client slot %u", client->slot);
+        this->free_client_(client);
+        return;
+      }
     }
     if (!client->has_non_observer || client_recently_active) {
       this->ping_client_(client);
@@ -1320,8 +1237,10 @@ void CoapServer::ping_client_(ehCoapClient *client) {
             if (error == OT_ERROR_NONE) {
               ehCoapClient *c = static_cast<ehCoapClient *>(ctx);
               std::lock_guard<std::mutex> guard(global_coap_server->lock_);
-              if (c->active)
+              if (c->active) {
                 c->last_response_ms = millis();
+                c->ping_miss_count = 0;
+              }
             }
           },
           client);
@@ -1349,8 +1268,10 @@ ehCoapClient *CoapServer::find_client_(const otIp6Address &addr, uint16_t port) 
 void CoapServer::touch_client_(const otMessageInfo &message_info) {
   std::lock_guard<std::mutex> guard(this->lock_);
   ehCoapClient *client = this->find_client_(message_info.mPeerAddr, message_info.mPeerPort);
-  if (client != nullptr)
+  if (client != nullptr) {
     client->last_response_ms = millis();
+    client->ping_miss_count = 0;
+  }
 }
 
 void CoapServer::free_client_(ehCoapClient *client) {
@@ -1366,7 +1287,7 @@ void CoapServer::free_client_(ehCoapClient *client) {
   }
   char addr_str[OT_IP6_ADDRESS_STRING_SIZE];
   otIp6AddressToString(&peer_addr, addr_str, sizeof(addr_str));
-  this->client_disconnected_trigger_.trigger(std::string(addr_str));
+  this->client_disconnected_callback_(std::string(addr_str));
 
   // Free all NON observers for this client in one pass under one lock acquisition.
   // CON observers are left alive — they self-cancel via handle_notification_ack on the
@@ -1421,103 +1342,56 @@ void CoapServer::free_observer_(ehCoapObserver *observer) {
   this->free_observers_ = observer;
 }
 
-size_t CoapServer::cbor_output_(uint8_t *buffer, ehCoapResource *resource) {
-  size_t lngth = 0;
-  switch (resource->type) {
-#ifdef USE_SENSOR
-    case EntityType::ENTITYTYPE_SENSOR:
-      lngth = this->cbor_output_(buffer, static_cast<sensor::Sensor *>(resource->entity));
-      break;
-#endif  // USE_SENSOR
-#ifdef USE_SWITCH
-    case EntityType::ENTITYTYPE_SWITCH:
-      lngth = this->cbor_output_(buffer, static_cast<switch_::Switch *>(resource->entity));
-      break;
-#endif  // USE_SWITCH
-#ifdef USE_BINARY_SENSOR
-    case EntityType::ENTITYTYPE_BINARY_SENSOR:
-      lngth = this->cbor_output_(buffer, static_cast<binary_sensor::BinarySensor *>(resource->entity));
-      break;
-#endif  // USE_BINARY_SENSOR
-#ifdef USE_BUTTON
-    case EntityType::ENTITYTYPE_BUTTON:
-      lngth = 0;  // button has no state to report
-      break;
-#endif  // USE_BUTTON
-#ifdef USE_TEXT_SENSOR
-    case EntityType::ENTITYTYPE_TEXT_SENSOR:
-      lngth = this->cbor_output_(buffer, static_cast<text_sensor::TextSensor *>(resource->entity));
-      break;
-#endif  // USE_TEXT_SENSOR
-#ifdef USE_NUMBER
-    case EntityType::ENTITYTYPE_NUMBER:
-      lngth = this->cbor_output_(buffer, static_cast<number::Number *>(resource->entity));
-      break;
-#endif  // USE_NUMBER
-#ifdef USE_LOCK
-    case EntityType::ENTITYTYPE_LOCK:
-      lngth = this->cbor_output_(buffer, static_cast<lock::Lock *>(resource->entity));
-      break;
-#endif  // USE_LOCK
-#ifdef USE_VALVE
-    case EntityType::ENTITYTYPE_VALVE:
-      lngth = this->cbor_output_(buffer, static_cast<valve::Valve *>(resource->entity));
-      break;
-#endif  // USE_VALVE
-    case EntityType::ENTITYTYPE_DEVICE:
-      lngth = 0;  // device info is served by handle_info_request, not cbor_output_
-      break;
-    case EntityType::ENTITYTYPE_UNKNOWN:
-    default:
-      ESP_LOGE(TAG, "Unknown entity");
-      lngth = this->cbor_output_(buffer, resource->entity);
-      break;
+void CoapServer::notify_observers_(ehCoapResource *resource, const uint8_t *payload, size_t payload_len) {
+  // Collect matching observers under lock_ then notify outside it.
+  // Holding lock_ while calling handle_observer_ (which acquires InstanceLock) would
+  // invert the lock order against OT callbacks that hold InstanceLock and acquire lock_.
+  // Storing resource alongside the pointer lets handle_observer_ detect reallocation
+  // of a freed node to a different subscriber in the window between collect and send.
+  struct Pending {
+    ehCoapObserver *observer;
+    ehCoapResource *resource;
+  };
+  // One observer per client per resource at most, so USE_COAP_SERVER_MAX_CLIENTS is a tight bound.
+  Pending pending[USE_COAP_SERVER_MAX_CLIENTS];
+  size_t pending_count = 0;
+  {
+    std::lock_guard<std::mutex> lock(this->lock_);
+    for (ehCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
+      if (obs->resource == resource) {
+        ESP_LOGV(TAG, "Found Observer");
+        if (pending_count < USE_COAP_SERVER_MAX_CLIENTS) {
+          pending[pending_count++] = {obs, obs->resource};
+        } else {
+          ESP_LOGW(TAG, "Observer notify limit reached, skipping");
+        }
+      }
+    }
   }
-  return lngth;
+  for (size_t i = 0; i < pending_count; i++)
+    this->handle_observer_(pending[i].observer, pending[i].resource, payload, payload_len);
 }
 
 void CoapServer::on_update_(EntityBase *entity) {
   if (entity->is_internal())
     return;
   ESP_LOGV(TAG, "On Update");
-  // Collect matching observers under lock_ then notify outside it.
-  // Holding lock_ while calling handle_observer_ (which acquires InstanceLock) would
-  // invert the lock order against OT callbacks that hold InstanceLock and acquire lock_.
-  // Collect matching (observer, resource) pairs under lock_ then notify outside it.
-  // Storing resource alongside the pointer lets handle_observer_ detect reallocation
-  // of a freed node to a different subscriber in the window between collect and send.
-  // A small fixed array is sufficient — only a handful of clients observe one entity.
-  struct Pending {
-    ehCoapObserver *observer;
-    ehCoapResource *resource;
-  };
-  // One observer per client per entity at most, so USE_COAP_SERVER_MAX_CLIENTS is a tight bound.
-  Pending pending[USE_COAP_SERVER_MAX_CLIENTS];
-  size_t pending_count = 0;
-  {
-    std::lock_guard<std::mutex> lock(this->lock_);
-    for (ehCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
-      if (obs->resource->entity == entity) {
-        ESP_LOGV(TAG, "Found Observer");
-        if (pending_count < USE_COAP_SERVER_MAX_CLIENTS) {
-          pending[pending_count++] = {obs, obs->resource};
-        } else {
-          ESP_LOGW(TAG, "Observer notify limit reached for entity, skipping");
-        }
-      }
+  ehCoapResource *resource = nullptr;
+  for (size_t i = 0; i < this->resources_.size(); i++) {
+    if (this->resources_[i].entity == entity && this->resources_[i].observable) {
+      resource = &this->resources_[i];
+      break;
     }
   }
-  if (pending_count == 0)
+  if (resource == nullptr)
     return;
   uint8_t payload_buffer[COAP_PAYLOAD_MAX_SIZE];
-  size_t payload_len = cbor_output_(payload_buffer, pending[0].resource);
+  size_t payload_len = cbor_output_(payload_buffer, resource);
   if (payload_len == 0) {
     ESP_LOGW(TAG, "cbor encode failed, skip notifications");
     return;
   }
-  for (size_t i = 0; i < pending_count; i++) {
-    this->handle_observer_(pending[i].observer, pending[i].resource, payload_buffer, payload_len);
-  }
+  this->notify_observers_(resource, payload_buffer, payload_len);
 }
 
 #ifdef USE_COAP_OSCORE
@@ -1664,12 +1538,14 @@ void CoapServer::handle_logs_request(void *context, otMessage *message, const ot
       goto exit;
     }
     // Replace any stale observer from the same client IP
-    for (ehCoapObserver *stale = self->active_observers_; stale != nullptr; stale = stale->next) {
-      if (stale->resource == resource &&
-          otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
-        std::lock_guard<std::mutex> lock(self->lock_);
-        self->free_observer_(stale);
-        break;
+    {
+      std::lock_guard<std::mutex> lock(self->lock_);
+      for (ehCoapObserver *stale = self->active_observers_; stale != nullptr; stale = stale->next) {
+        if (stale->resource == resource &&
+            otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
+          self->free_observer_(stale);
+          break;
+        }
       }
     }
     otCoapToken token;
@@ -1677,9 +1553,10 @@ void CoapServer::handle_logs_request(void *context, otMessage *message, const ot
     self->new_observer_(resource, *message_info, token, otCoapMessageGetType(message));
   } else if (observe == 1) {
     ehCoapObserver *obs = self->get_observer_(message, message_info);
-    if (obs != nullptr)
+    if (obs != nullptr) {
       std::lock_guard<std::mutex> lock(self->lock_);
-    self->free_observer_(obs);
+      self->free_observer_(obs);
+    }
   }
 
   static const uint8_t kEmptyArray[] = {0x80};  // CBOR [] — no current state to return
@@ -1705,7 +1582,7 @@ void CoapServer::on_log_(uint8_t level, const char *tag, const char *message, si
     std::lock_guard<std::mutex> guard(this->lock_);
     bool found = false;
     for (ehCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
-      if (obs->resource == &this->logs_resource_) {
+      if (obs->resource == this->logs_resource_) {
         found = true;
         break;
       }
@@ -1751,24 +1628,8 @@ void CoapServer::flush_logs_() {
       this->log_buf_has_data_ = false;
     }
   }
-
-  if (payload_len > 0) {
-    struct Pending {
-      ehCoapObserver *observer;
-      ehCoapResource *resource;
-    };
-    Pending pending[USE_COAP_SERVER_MAX_CLIENTS];
-    size_t pending_count = 0;
-    {
-      std::lock_guard<std::mutex> guard(this->lock_);
-      for (ehCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
-        if (obs->resource == &this->logs_resource_ && pending_count < USE_COAP_SERVER_MAX_CLIENTS)
-          pending[pending_count++] = {obs, obs->resource};
-      }
-    }
-    for (size_t i = 0; i < pending_count; i++)
-      this->handle_observer_(pending[i].observer, pending[i].resource, payload, payload_len);
-  }
+  if (payload_len > 0)
+    this->notify_observers_(this->logs_resource_, payload, payload_len);
 
   // otLinkGetPollPeriod is a read-only getter with no state mutation; safe to call without InstanceLock.
   uint32_t flush_ms = std::max(otLinkGetPollPeriod(this->instance_), (uint32_t) 1000);

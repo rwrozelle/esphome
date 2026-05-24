@@ -1,0 +1,9 @@
+<<: !include common.yaml
+
+network:
+  enable_ipv6: true
+
+openthread:
+  channel: 13
+  network_key: 0xdfd34f0f05cad978ec4e32b0413038ff
+  pan_id: 0x8f28

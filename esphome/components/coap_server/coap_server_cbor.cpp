@@ -3,6 +3,15 @@
 #include "esphome/core/log.h"
 #include "cbor.h"
 
+#ifndef CBOR_CHECK
+#define CBOR_CHECK(expr) \
+  do { \
+    CborError cbor_err_ = (expr); \
+    if (cbor_err_ != CborNoError) \
+      return cbor_err_; \
+  } while (0)
+#endif
+
 namespace esphome::coap_server {
 
 static const char *const TAG = "coap_server";
@@ -35,30 +44,29 @@ static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_
 }
 #endif  // USE_SENSOR
 
-#ifdef USE_SWITCH
-static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_len, switch_::Switch *entity) {
+#if defined(USE_SWITCH) || defined(USE_BINARY_SENSOR)
+static CborError encode_bool_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_len, bool state) {
   CborEncoder encoder, map_encoder;
   cbor_encoder_init(&encoder, buffer, buf_len, 0);
   CBOR_CHECK(cbor_encoder_create_map(&encoder, &map_encoder, 1));
   CBOR_CHECK(cbor_encode_int(&map_encoder, 4));  // vb
-  CBOR_CHECK(cbor_encode_boolean(&map_encoder, entity->state));
+  CBOR_CHECK(cbor_encode_boolean(&map_encoder, state));
   CBOR_CHECK(cbor_encoder_close_container(&encoder, &map_encoder));
   *encoded_len = cbor_encoder_get_buffer_size(&encoder, buffer);
   return CborNoError;
+}
+#endif
+
+#ifdef USE_SWITCH
+static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_len, switch_::Switch *entity) {
+  return encode_bool_entity(buffer, buf_len, encoded_len, entity->state);
 }
 #endif  // USE_SWITCH
 
 #ifdef USE_BINARY_SENSOR
 static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_len,
                                binary_sensor::BinarySensor *entity) {
-  CborEncoder encoder, map_encoder;
-  cbor_encoder_init(&encoder, buffer, buf_len, 0);
-  CBOR_CHECK(cbor_encoder_create_map(&encoder, &map_encoder, 1));
-  CBOR_CHECK(cbor_encode_int(&map_encoder, 4));  // vb
-  CBOR_CHECK(cbor_encode_boolean(&map_encoder, entity->state));
-  CBOR_CHECK(cbor_encoder_close_container(&encoder, &map_encoder));
-  *encoded_len = cbor_encoder_get_buffer_size(&encoder, buffer);
-  return CborNoError;
+  return encode_bool_entity(buffer, buf_len, encoded_len, entity->state);
 }
 #endif  // USE_BINARY_SENSOR
 
@@ -133,49 +141,65 @@ static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_
   return CborNoError;
 }
 
-template<typename T> static size_t cbor_output_typed(uint8_t *buffer, T *entity) {
+#ifdef USE_OPENTHREAD
+size_t CoapServer::cbor_output_(uint8_t *buffer, ehCoapResource *resource) {
   size_t encoded_len = 0;
-  CborError err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, entity);
+  CborError err = CborNoError;
+  switch (resource->type) {
+#ifdef USE_SENSOR
+    case EntityType::ENTITYTYPE_SENSOR:
+      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, static_cast<sensor::Sensor *>(resource->entity));
+      break;
+#endif
+#ifdef USE_SWITCH
+    case EntityType::ENTITYTYPE_SWITCH:
+      err =
+          encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, static_cast<switch_::Switch *>(resource->entity));
+      break;
+#endif
+#ifdef USE_BINARY_SENSOR
+    case EntityType::ENTITYTYPE_BINARY_SENSOR:
+      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len,
+                          static_cast<binary_sensor::BinarySensor *>(resource->entity));
+      break;
+#endif
+#ifdef USE_TEXT_SENSOR
+    case EntityType::ENTITYTYPE_TEXT_SENSOR:
+      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len,
+                          static_cast<text_sensor::TextSensor *>(resource->entity));
+      break;
+#endif
+#ifdef USE_NUMBER
+    case EntityType::ENTITYTYPE_NUMBER:
+      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, static_cast<number::Number *>(resource->entity));
+      break;
+#endif
+#ifdef USE_LOCK
+    case EntityType::ENTITYTYPE_LOCK:
+      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, static_cast<lock::Lock *>(resource->entity));
+      break;
+#endif
+#ifdef USE_VALVE
+    case EntityType::ENTITYTYPE_VALVE:
+      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, static_cast<valve::Valve *>(resource->entity));
+      break;
+#endif
+    case EntityType::ENTITYTYPE_BUTTON:
+    case EntityType::ENTITYTYPE_DEVICE:
+    case EntityType::ENTITYTYPE_LOG:
+      return 0;
+    case EntityType::ENTITYTYPE_UNKNOWN:
+    default:
+      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, resource->entity);
+      break;
+  }
   if (err != CborNoError) {
     ESP_LOGE(TAG, "tinycbor error: %d", err);
     return 0;
   }
   return encoded_len;
 }
-
-#ifdef USE_SENSOR
-size_t CoapServer::cbor_output_(uint8_t *buffer, sensor::Sensor *entity) { return cbor_output_typed(buffer, entity); }
-#endif  // USE_SENSOR
-
-#ifdef USE_SWITCH
-size_t CoapServer::cbor_output_(uint8_t *buffer, switch_::Switch *entity) { return cbor_output_typed(buffer, entity); }
-#endif  // USE_SWITCH
-
-#ifdef USE_BINARY_SENSOR
-size_t CoapServer::cbor_output_(uint8_t *buffer, binary_sensor::BinarySensor *entity) {
-  return cbor_output_typed(buffer, entity);
-}
-#endif  // USE_BINARY_SENSOR
-
-#ifdef USE_TEXT_SENSOR
-size_t CoapServer::cbor_output_(uint8_t *buffer, text_sensor::TextSensor *entity) {
-  return cbor_output_typed(buffer, entity);
-}
-#endif  // USE_TEXT_SENSOR
-
-#ifdef USE_NUMBER
-size_t CoapServer::cbor_output_(uint8_t *buffer, number::Number *entity) { return cbor_output_typed(buffer, entity); }
-#endif  // USE_NUMBER
-
-#ifdef USE_LOCK
-size_t CoapServer::cbor_output_(uint8_t *buffer, lock::Lock *entity) { return cbor_output_typed(buffer, entity); }
-#endif  // USE_LOCK
-
-#ifdef USE_VALVE
-size_t CoapServer::cbor_output_(uint8_t *buffer, valve::Valve *entity) { return cbor_output_typed(buffer, entity); }
-#endif  // USE_VALVE
-
-size_t CoapServer::cbor_output_(uint8_t *buffer, EntityBase *entity) { return cbor_output_typed(buffer, entity); }
+#endif  // USE_OPENTHREAD
 
 static CborError encode_device_info_impl(uint8_t *buf, size_t buf_len, size_t *encoded_len, CoapServer *server) {
   CborEncoder enc, map;
@@ -193,7 +217,7 @@ static CborError encode_device_info_impl(uint8_t *buf, size_t buf_len, size_t *e
   const uint8_t area_count = 0;
 #endif
   CBOR_CHECK(cbor_encoder_create_map(&enc, &map,
-                                     (has_friendly ? 9 : 8) + (area_count > 0 ? 1 : 0) + (device_count > 0 ? 1 : 0)));
+                                     (has_friendly ? 10 : 9) + (area_count > 0 ? 1 : 0) + (device_count > 0 ? 1 : 0)));
   CBOR_CHECK(cbor_encode_text_stringz(&map, "name"));
   const StringRef &name = App.get_name();
   CBOR_CHECK(cbor_encode_text_string(&map, name.c_str(), name.size()));
@@ -210,6 +234,8 @@ static CborError encode_device_info_impl(uint8_t *buf, size_t buf_len, size_t *e
   CBOR_CHECK(cbor_encode_text_stringz(&map, "ping_timeout"));
   CBOR_CHECK(cbor_encode_uint(
       &map, (uint32_t) (server->get_server_ping_interval() / 1000.0f * server->get_server_ping_timeout_ratio())));
+  CBOR_CHECK(cbor_encode_text_stringz(&map, "ping_retry"));
+  CBOR_CHECK(cbor_encode_uint(&map, server->get_server_ping_retry()));
   CBOR_CHECK(cbor_encode_text_stringz(&map, "oscore"));
 #ifdef USE_COAP_OSCORE
   CBOR_CHECK(cbor_encode_boolean(&map, true));

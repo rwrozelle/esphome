@@ -1,0 +1,81 @@
+sensor:
+  - platform: template
+    name: "CoAP Sensor"
+    id: coap_test_sensor
+    lambda: return 22.5;
+    unit_of_measurement: "°C"
+    device_class: temperature
+
+binary_sensor:
+  - platform: template
+    name: "CoAP Binary Sensor"
+    id: coap_test_binary
+    lambda: return true;
+
+switch:
+  - platform: template
+    name: "CoAP Switch"
+    id: coap_test_switch
+    optimistic: true
+
+text_sensor:
+  - platform: template
+    name: "CoAP Text Sensor"
+    id: coap_test_text
+    lambda: return {"hello"};
+
+number:
+  - platform: template
+    name: "CoAP Number"
+    id: coap_test_number
+    optimistic: true
+    min_value: 0
+    max_value: 100
+    step: 1
+
+lock:
+  - platform: template
+    name: "CoAP Lock"
+    id: coap_test_lock
+    lambda: return LOCK_STATE_LOCKED;
+    optimistic: true
+
+valve:
+  - platform: template
+    name: "CoAP Valve"
+    id: coap_test_valve
+    optimistic: true
+    lambda: return VALVE_OPEN;
+
+button:
+  - platform: template
+    name: "CoAP Button"
+    id: coap_test_button
+    on_press:
+      - logger.log: "CoAP button pressed"
+
+coap_server:
+  port: 5683
+  server_ping_interval: 30s
+  server_ping_timeout_ratio: 2.0
+  server_ping_retry: 2
+  client_ping_interval: 120s
+  client_ping_timeout_ratio: 3.0
+  client_ping_retry: 3
+  max_connections: 2
+  subscription_confirm: false
+  on_client_connected:
+    then:
+      - logger.log:
+          format: "Client connected: %s"
+          args: [client_address.c_str()]
+  on_client_disconnected:
+    then:
+      - logger.log:
+          format: "Client disconnected: %s"
+          args: [client_address.c_str()]
+  oscore:
+    master_secret: "0102030405060708090a0b0c0d0e0f10"
+    master_salt: "9e7ca92223786340"
+    sender_id: "01"
+    recipient_id: "00"
