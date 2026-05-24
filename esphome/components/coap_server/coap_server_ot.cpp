@@ -424,6 +424,10 @@ void CoapServer::handle_well_known_core(void *context, otMessage *message, const
     uint16_t len = format_link_entry(entry, sizeof(entry), self->resources_[i], i > 1);
     SuccessOrExit(error = otMessageAppend(response, entry, len));
   }
+  {
+    static const char kPingEntry[] = ",</ping>;rt=\"esphome.ping\";if=\"if.a\";ct=112";
+    SuccessOrExit(error = otMessageAppend(response, kPingEntry, sizeof(kPingEntry) - 1));
+  }
 
   SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
 exit:
