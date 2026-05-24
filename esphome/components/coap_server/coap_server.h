@@ -191,7 +191,7 @@ class CoapServer final : public Component, public Controller {
   void handle_observer_(ehCoapObserver *observer, ehCoapResource *expected_resource, const uint8_t *payload,
                         size_t payload_len);
   ehCoapClient *new_client_(const otMessageInfo &message_info);
-  ehCoapClient *find_client_(const otIp6Address &addr, uint16_t port);
+  ehCoapClient *find_client_(const otIp6Address &addr);
   void touch_client_(const otMessageInfo &message_info);
   void free_client_(ehCoapClient *client);
   void ping_client_(ehCoapClient *client);

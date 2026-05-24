@@ -520,7 +520,7 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
           bool client_known;
           {
             std::lock_guard<std::mutex> guard(this->lock_);
-            client_known = (this->find_client_(message_info->mPeerAddr, message_info->mPeerPort) != nullptr);
+            client_known = (this->find_client_(message_info->mPeerAddr) != nullptr);
           }
           if (!client_known)
             this->new_client_(*message_info);
@@ -773,7 +773,7 @@ void CoapServer::handle_ping_request(void *context, otMessage *message, const ot
   bool boot_signal = false;
   {
     std::lock_guard<std::mutex> guard(self->lock_);
-    ehCoapClient *client = self->find_client_(message_info->mPeerAddr, message_info->mPeerPort);
+    ehCoapClient *client = self->find_client_(message_info->mPeerAddr);
     if (client != nullptr) {
       client->last_response_ms = millis();
       client->ping_miss_count = 0;
@@ -1107,8 +1107,7 @@ ehCoapObserver *CoapServer::get_observer_(otMessage *message, const otMessageInf
   }
   for (ehCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
     if (otCoapMessageAreTokensEqual(&obs->coap_token, &coap_token) &&
-        otIp6IsAddressEqual(&obs->message_info.mPeerAddr, &message_info->mPeerAddr) &&
-        obs->message_info.mPeerPort == message_info->mPeerPort) {
+        otIp6IsAddressEqual(&obs->message_info.mPeerAddr, &message_info->mPeerAddr)) {
       return obs;
     }
   }
@@ -1140,7 +1139,7 @@ ehCoapObserver *CoapServer::new_observer_(ehCoapResource *resource, const otMess
     this->high_water_mark_ = this->active_count_;
   }
   if (obs_type == OT_COAP_TYPE_NON_CONFIRMABLE) {
-    ehCoapClient *client = this->find_client_(message_info.mPeerAddr, message_info.mPeerPort);
+    ehCoapClient *client = this->find_client_(message_info.mPeerAddr);
     if (client != nullptr)
       client->has_non_observer = true;
   }
@@ -1169,8 +1168,7 @@ ehCoapClient *CoapServer::new_client_(const otMessageInfo &message_info) {
         // Scan active_observers_ here to catch any NON observers already registered.
         for (ehCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
           if (obs->obs_type == OT_COAP_TYPE_NON_CONFIRMABLE &&
-              otIp6IsAddressEqual(&obs->message_info.mPeerAddr, &message_info.mPeerAddr) &&
-              obs->message_info.mPeerPort == message_info.mPeerPort) {
+              otIp6IsAddressEqual(&obs->message_info.mPeerAddr, &message_info.mPeerAddr)) {
             client.has_non_observer = true;
             break;
           }
@@ -1261,9 +1259,9 @@ void CoapServer::cancel_ping_client_(ehCoapClient *client) {
   this->cancel_timeout(key);
 }
 
-ehCoapClient *CoapServer::find_client_(const otIp6Address &addr, uint16_t port) {
+ehCoapClient *CoapServer::find_client_(const otIp6Address &addr) {
   for (auto &client : this->active_clients_) {
-    if (client.active && otIp6IsAddressEqual(&client.peer_addr, &addr) && client.peer_port == port)
+    if (client.active && otIp6IsAddressEqual(&client.peer_addr, &addr))
       return &client;
   }
   return nullptr;
@@ -1271,7 +1269,7 @@ ehCoapClient *CoapServer::find_client_(const otIp6Address &addr, uint16_t port) 
 
 void CoapServer::touch_client_(const otMessageInfo &message_info) {
   std::lock_guard<std::mutex> guard(this->lock_);
-  ehCoapClient *client = this->find_client_(message_info.mPeerAddr, message_info.mPeerPort);
+  ehCoapClient *client = this->find_client_(message_info.mPeerAddr);
   if (client != nullptr) {
     client->last_response_ms = millis();
     client->ping_miss_count = 0;
@@ -1281,11 +1279,9 @@ void CoapServer::touch_client_(const otMessageInfo &message_info) {
 void CoapServer::free_client_(ehCoapClient *client) {
   this->cancel_ping_client_(client);
   otIp6Address peer_addr;
-  uint16_t peer_port;
   {
     std::lock_guard<std::mutex> lock(this->lock_);
     peer_addr = client->peer_addr;
-    peer_port = client->peer_port;
     client->active = false;
     this->active_client_count_--;
   }
@@ -1304,7 +1300,7 @@ void CoapServer::free_client_(ehCoapClient *client) {
     while (*pp != nullptr) {
       ehCoapObserver *obs = *pp;
       if (obs->obs_type == OT_COAP_TYPE_NON_CONFIRMABLE &&
-          otIp6IsAddressEqual(&obs->message_info.mPeerAddr, &peer_addr) && obs->message_info.mPeerPort == peer_port) {
+          otIp6IsAddressEqual(&obs->message_info.mPeerAddr, &peer_addr)) {
         *pp = obs->next;
         this->active_count_--;
         obs->resource = nullptr;
@@ -1329,14 +1325,13 @@ void CoapServer::free_observer_(ehCoapObserver *observer) {
     bool has_non = false;
     for (ehCoapObserver *o = this->active_observers_; o != nullptr; o = o->next) {
       if (o->obs_type == OT_COAP_TYPE_NON_CONFIRMABLE &&
-          otIp6IsAddressEqual(&o->message_info.mPeerAddr, &observer->message_info.mPeerAddr) &&
-          o->message_info.mPeerPort == observer->message_info.mPeerPort) {
+          otIp6IsAddressEqual(&o->message_info.mPeerAddr, &observer->message_info.mPeerAddr)) {
         has_non = true;
         break;
       }
     }
     if (!has_non) {
-      ehCoapClient *client = this->find_client_(observer->message_info.mPeerAddr, observer->message_info.mPeerPort);
+      ehCoapClient *client = this->find_client_(observer->message_info.mPeerAddr);
       if (client != nullptr)
         client->has_non_observer = false;
     }
