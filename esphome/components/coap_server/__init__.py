@@ -101,7 +101,7 @@ CONFIG_SCHEMA = cv.All(
                 cv.Range(min=cv.TimePeriod(seconds=20)),
             ),
             cv.Optional(CONF_SERVER_PING_TIMEOUT_RATIO, default=2.5): cv.All(
-                cv.float_, cv.Range(min=0.5, max=5.0)
+                cv.float_, cv.Range(min=0.01)
             ),
             cv.Optional(CONF_SERVER_PING_RETRY, default=1): cv.int_range(min=1, max=5),
             # Used by Server to check if client is still alive
@@ -110,7 +110,7 @@ CONFIG_SCHEMA = cv.All(
                 cv.Range(min=cv.TimePeriod(seconds=60)),
             ),
             cv.Optional(CONF_CLIENT_PING_TIMEOUT_RATIO, default=2.5): cv.All(
-                cv.float_, cv.Range(min=0.5, max=5.0)
+                cv.float_, cv.Range(min=0.01)
             ),
             cv.Optional(CONF_CLIENT_PING_RETRY, default=1): cv.int_range(min=1, max=5),
             # Maximum allowed active connections, list is used for checking aliveness

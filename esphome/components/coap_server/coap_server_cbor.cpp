@@ -232,8 +232,9 @@ static CborError encode_device_info_impl(uint8_t *buf, size_t buf_len, size_t *e
   CBOR_CHECK(cbor_encode_text_stringz(&map, "ping_interval"));
   CBOR_CHECK(cbor_encode_uint(&map, server->get_server_ping_interval() / 1000));
   CBOR_CHECK(cbor_encode_text_stringz(&map, "ping_timeout"));
-  CBOR_CHECK(cbor_encode_uint(
-      &map, (uint32_t) (server->get_server_ping_interval() / 1000.0f * server->get_server_ping_timeout_ratio())));
+  CBOR_CHECK(cbor_encode_uint(&map, (uint32_t) std::max((server->get_server_ping_interval() / 1000.0f *
+                                                         server->get_server_ping_timeout_ratio()),
+                                                        (float) 1.0f)));
   CBOR_CHECK(cbor_encode_text_stringz(&map, "ping_retry"));
   CBOR_CHECK(cbor_encode_uint(&map, server->get_server_ping_retry()));
   CBOR_CHECK(cbor_encode_text_stringz(&map, "oscore"));

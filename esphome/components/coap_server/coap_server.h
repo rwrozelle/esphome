@@ -12,6 +12,9 @@
 #include <mutex>
 #include <vector>
 #endif  // USE_OPENTHREAD
+#ifdef USE_COAP_OSCORE
+#include <psa/crypto.h>
+#endif
 
 namespace esphome::coap_server {
 
@@ -168,6 +171,13 @@ class CoapServer final : public Component, public Controller {
   void set_oscore_sender_id(std::vector<uint8_t> id) { this->oscore_sender_id_ = std::move(id); }
   void set_oscore_recipient_id(std::vector<uint8_t> id) { this->oscore_recipient_id_ = std::move(id); }
   void set_oscore_id_context(std::vector<uint8_t> ctx) { this->oscore_id_context_ = std::move(ctx); }
+
+  struct OscoreRequestInfo {
+    uint8_t piv[5];
+    uint8_t piv_len{0};
+    uint8_t kid[8];
+    uint8_t kid_len{0};
+  };
 #endif  // USE_COAP_OSCORE
 
  protected:
@@ -230,27 +240,50 @@ class CoapServer final : public Component, public Controller {
   mutable std::mutex lock_;
 
 #ifdef USE_COAP_OSCORE
-  // Key material provided via YAML
+  // Key material provided via YAML (cleared after derive)
   std::vector<uint8_t> oscore_master_secret_;
   std::vector<uint8_t> oscore_master_salt_;
   std::vector<uint8_t> oscore_sender_id_;
   std::vector<uint8_t> oscore_recipient_id_;
   std::vector<uint8_t> oscore_id_context_;
 
-  // Derived keys (computed once in setup())
-  static constexpr size_t OSCORE_KEY_LEN = 16;  // AES-CCM-16-64-128
+  static constexpr size_t OSCORE_KEY_LEN = 16;
   static constexpr size_t OSCORE_IV_LEN = 13;
   static constexpr size_t OSCORE_TAG_LEN = 8;
-  uint8_t oscore_sender_key_[OSCORE_KEY_LEN]{};
-  uint8_t oscore_recipient_key_[OSCORE_KEY_LEN]{};
+
+  // Derived keys imported as volatile PSA key objects
+  psa_key_id_t oscore_sender_key_id_{PSA_KEY_ID_NULL};
+  psa_key_id_t oscore_recipient_key_id_{PSA_KEY_ID_NULL};
   uint8_t oscore_common_iv_[OSCORE_IV_LEN]{};
+
   static constexpr uint32_t OSCORE_SEQ_INTERVAL = 1024;
   uint32_t oscore_sender_seq_no_{0};
   uint32_t oscore_seq_threshold_{0};
+  uint32_t oscore_last_seen_seq_{0};
+
+  // Sender ID retained after key derivation for notification OSCORE option
+  uint8_t oscore_sender_id_buf_[8]{};
+  uint8_t oscore_sender_id_len_{0};
 
   bool oscore_derive_keys_();
   void oscore_save_seq_no_();
   void oscore_increment_seq_no_();
+
+  // Returns false and sends 4.01 if the request must be OSCORE-protected but isn't.
+  // On success fills plaintext/plaintext_len (inner CoAP bytes) and req_info.
+  // If resource is oscore_exempt, plaintext is left empty and returns true immediately.
+  bool oscore_unprotect_request_(otMessage *message, const ehCoapResource *resource, uint8_t *plaintext,
+                                 size_t *plaintext_len, OscoreRequestInfo *req_info);
+
+  // Encrypts inner_payload (code + options + payload) into out_buf.
+  // For responses: req_info carries the request's PIV/KID; is_notification uses sender_seq_no_.
+  size_t oscore_protect_response_(const uint8_t *inner, size_t inner_len, const OscoreRequestInfo &req_info,
+                                  bool is_notification, uint8_t *out_buf, size_t out_buf_len);
+
+  static void oscore_build_nonce_(const uint8_t *piv, uint8_t piv_len, const uint8_t *kid, uint8_t kid_len,
+                                  const uint8_t *common_iv, uint8_t nonce[OSCORE_IV_LEN]);
+  static size_t oscore_build_aad_(const uint8_t *kid, uint8_t kid_len, const uint8_t *piv, uint8_t piv_len,
+                                  uint8_t *buf, size_t buf_len);
 #endif  // USE_COAP_OSCORE
 #endif  // USE_OPENTHREAD
 };

@@ -16,7 +16,7 @@
   } while (false)
 #endif
 #ifdef USE_COAP_OSCORE
-#include <mbedtls/hkdf.h>
+#include <psa/crypto.h>
 #include "nvs.h"
 #endif
 #ifdef USE_LOGGER
@@ -262,16 +262,17 @@ bool CoapServer::teardown() {
 }  // teardown()
 
 void CoapServer::dump_config() {
-  ESP_LOGCONFIG(TAG,
-                "CoAP Server:\n"
-                "  Listen Port: %d\n"
-                "  Resources: %" PRIu32 "\n"
-                "  Server Ping: interval=%" PRIu32 "s timeout=%" PRIu32 "s\n"
-                "  Client Ping: interval=%" PRIu32 "s timeout=%" PRIu32 "s",
-                USE_COAP_SERVER_PORT, (uint32_t) (this->resources_.size() - 2), this->server_ping_interval_ms_ / 1000,
-                (uint32_t) (this->server_ping_interval_ms_ / 1000.0f * this->server_ping_timeout_ratio_),
-                this->client_ping_interval_ms_ / 1000,
-                (uint32_t) (this->client_ping_interval_ms_ / 1000.0f * this->client_ping_timeout_ratio_));
+  ESP_LOGCONFIG(
+      TAG,
+      "CoAP Server:\n"
+      "  Listen Port: %d\n"
+      "  Resources: %" PRIu32 "\n"
+      "  Server Ping: interval=%" PRIu32 "s timeout=%" PRIu32 "s\n"
+      "  Client Ping: interval=%" PRIu32 "s timeout=%" PRIu32 "s",
+      USE_COAP_SERVER_PORT, (uint32_t) (this->resources_.size() - 2), this->server_ping_interval_ms_ / 1000,
+      (uint32_t) std::max((this->server_ping_interval_ms_ / 1000.0f * this->server_ping_timeout_ratio_), (float) 1.0f),
+      this->client_ping_interval_ms_ / 1000,
+      (uint32_t) std::max((this->client_ping_interval_ms_ / 1000.0f * this->client_ping_timeout_ratio_), (float) 1.0f));
 #ifdef USE_COAP_OSCORE
   ESP_LOGCONFIG(TAG, "  OSCORE: enabled");
 #endif
@@ -473,6 +474,57 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
 
   this->touch_client_(*message_info);
 
+#ifdef USE_COAP_OSCORE
+  uint8_t oscore_plain[256];
+  size_t oscore_plain_len = 0;
+  OscoreRequestInfo oscore_req_info{};
+  if (!this->oscore_unprotect_request_(message, resource, oscore_plain, &oscore_plain_len, &oscore_req_info)) {
+    response = otCoapNewMessage(instance, nullptr);
+    if (response) {
+      otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_UNAUTHORIZED);
+      otCoapSendResponse(instance, response, message_info);
+    }
+    return;
+  }
+  // For protected requests, override msg_offset/msg_len to use plaintext.
+  // inner layout: [code(1)] [options] [0xFF] [payload]
+  // We only need to extract the payload here; code/options are handled below.
+  const bool oscore_protected = (oscore_plain_len > 0);
+  if (oscore_protected) {
+    // Skip code byte and options to find payload
+    uint8_t inner_pos = 1;  // skip code
+    while (inner_pos < oscore_plain_len) {
+      uint8_t delta_len = oscore_plain[inner_pos++];
+      if (delta_len == 0xFF)
+        break;
+      uint8_t opt_delta = (delta_len >> 4) & 0x0F;
+      uint8_t opt_len_field = delta_len & 0x0F;
+      if (opt_delta == 13)
+        inner_pos++;
+      else if (opt_delta == 14)
+        inner_pos += 2;
+      if (opt_len_field == 13)
+        inner_pos++;
+      else if (opt_len_field == 14)
+        inner_pos += 2;
+      else
+        inner_pos += opt_len_field;
+    }
+    // inner_pos now points to start of inner payload (after 0xFF marker)
+    msg_offset = inner_pos;
+    msg_len = (uint16_t) (oscore_plain_len - inner_pos);
+  }
+#endif  // USE_COAP_OSCORE
+
+  // When OSCORE is active, the outer code is POST (for plain GET) or FETCH (for GET+Observe).
+  // The actual method is in oscore_plain[0]. Use the inner code for dispatch.
+#ifdef USE_COAP_OSCORE
+  const otCoapCode effective_code =
+      oscore_protected ? static_cast<otCoapCode>(oscore_plain[0]) : otCoapMessageGetCode(message);
+#else
+  const otCoapCode effective_code = otCoapMessageGetCode(message);
+#endif
+
   response = otCoapNewMessage(instance, nullptr);
   if (response == nullptr)
     return;
@@ -481,7 +533,7 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
     SuccessOrExit(
         error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_METHOD_NOT_ALLOWED));
     SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-  } else if (otCoapMessageGetCode(message) == OT_COAP_CODE_GET) {
+  } else if (effective_code == OT_COAP_CODE_GET) {
     uint8_t observe = 3;
     bool observe_option_present = false;
     ehCoapObserver *observer = nullptr;
@@ -540,6 +592,37 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
       SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
       goto exit;
     }
+#ifdef USE_COAP_OSCORE
+    if (oscore_protected) {
+      // Inner: [2.05 Content][Content-Format delta=12 len=1 val=50][0xFF][payload]
+      uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
+      size_t inner_len = 0;
+      inner[inner_len++] = 0x45;  // 2.05 Content
+      inner[inner_len++] = 0xC1;  // Content-Format option: delta=12, len=1
+      inner[inner_len++] = 0x32;  // value=50 (application/cbor)
+      inner[inner_len++] = 0xFF;  // payload marker
+      memcpy(inner + inner_len, payload_buffer, payload_len);
+      inner_len += payload_len;
+      uint8_t ciphertext[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
+      size_t cipher_len =
+          this->oscore_protect_response_(inner, inner_len, oscore_req_info, false, ciphertext, sizeof(ciphertext));
+      if (cipher_len == 0) {
+        SuccessOrExit(
+            error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
+        SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+        goto exit;
+      }
+      // Outer: 2.04 Changed + OSCORE option (empty for simple response) + ciphertext
+      SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
+      if (resource->observable && observer != nullptr && observe_option_present && observe == 0)
+        SuccessOrExit(error = otCoapMessageAppendObserveOption(response, observer->observe_serial++));
+      SuccessOrExit(error = otCoapMessageAppendOption(response, 9, 0, nullptr));  // OSCORE option, empty
+      SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
+      SuccessOrExit(error = otMessageAppend(response, ciphertext, (uint16_t) cipher_len));
+      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+      goto exit;
+    }
+#endif  // USE_COAP_OSCORE
     SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
     if (resource->observable && observer != nullptr && observe_option_present && observe == 0) {
       SuccessOrExit(error = otCoapMessageAppendObserveOption(response, observer->observe_serial++));
@@ -550,12 +633,27 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
     SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
   } else if ((type == ENTITYTYPE_SWITCH || type == ENTITYTYPE_BUTTON || type == ENTITYTYPE_NUMBER ||
               type == ENTITYTYPE_LOCK || type == ENTITYTYPE_VALVE) &&
-             otCoapMessageGetCode(message) == OT_COAP_CODE_POST) {
+             effective_code == OT_COAP_CODE_POST) {
+#ifdef USE_COAP_OSCORE
+    if (!oscore_protected) {
+      msg_offset = otMessageGetOffset(message);
+      msg_len = otMessageGetLength(message) - msg_offset;
+    }
+    // else msg_offset/msg_len already set from plaintext above
+#else
     msg_offset = otMessageGetOffset(message);
     msg_len = otMessageGetLength(message) - msg_offset;
+#endif
     if (msg_len > 0 && msg_len <= COAP_PAYLOAD_MAX_SIZE) {
       uint8_t msg_buf[COAP_PAYLOAD_MAX_SIZE];
+#ifdef USE_COAP_OSCORE
+      if (oscore_protected)
+        memcpy(msg_buf, oscore_plain + msg_offset, msg_len);
+      else
+        otMessageRead(message, msg_offset, msg_buf, msg_len);
+#else
       otMessageRead(message, msg_offset, msg_buf, msg_len);
+#endif
       CborParser parser;
       CborValue root, map_val;
       if (cbor_parser_init(msg_buf, msg_len, 0, &parser, &root) == CborNoError && cbor_value_is_map(&root) &&
@@ -658,6 +756,34 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
       SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
       goto exit;
     }
+#ifdef USE_COAP_OSCORE
+    if (oscore_protected) {
+      // Inner: [2.04 Changed][Content-Format delta=12 len=1 val=50][0xFF][payload]
+      uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
+      size_t inner_len = 0;
+      inner[inner_len++] = 0x44;  // 2.04 Changed
+      inner[inner_len++] = 0xC1;  // Content-Format option: delta=12, len=1
+      inner[inner_len++] = 0x32;  // value=50 (application/cbor)
+      inner[inner_len++] = 0xFF;  // payload marker
+      memcpy(inner + inner_len, payload_buffer, payload_len);
+      inner_len += payload_len;
+      uint8_t ciphertext[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
+      size_t cipher_len =
+          this->oscore_protect_response_(inner, inner_len, oscore_req_info, false, ciphertext, sizeof(ciphertext));
+      if (cipher_len == 0) {
+        SuccessOrExit(
+            error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
+        SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+        goto exit;
+      }
+      SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
+      SuccessOrExit(error = otCoapMessageAppendOption(response, 9, 0, nullptr));  // OSCORE option, empty
+      SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
+      SuccessOrExit(error = otMessageAppend(response, ciphertext, (uint16_t) cipher_len));
+      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+      goto exit;
+    }
+#endif  // USE_COAP_OSCORE
     SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
     SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
     SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
@@ -704,7 +830,34 @@ void CoapServer::handle_button_request(ehCoapResource *resource, otMessage *mess
   }
 
   if (otCoapMessageGetCode(message) == OT_COAP_CODE_POST) {
+#ifdef USE_COAP_OSCORE
+    uint8_t oscore_plain[64];
+    size_t oscore_plain_len = 0;
+    OscoreRequestInfo oscore_req_info{};
+    if (!this->oscore_unprotect_request_(message, resource, oscore_plain, &oscore_plain_len, &oscore_req_info)) {
+      otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_UNAUTHORIZED);
+      otCoapSendResponse(instance, response, message_info);
+      return;
+    }
+#endif
     static_cast<button::Button *>(resource->entity)->press();
+#ifdef USE_COAP_OSCORE
+    if (oscore_plain_len > 0) {
+      // Inner: [2.04 Changed] (no payload for button)
+      uint8_t inner[1] = {0x44};
+      uint8_t ciphertext[OSCORE_TAG_LEN + 4];
+      size_t cipher_len =
+          this->oscore_protect_response_(inner, 1, oscore_req_info, false, ciphertext, sizeof(ciphertext));
+      if (cipher_len > 0) {
+        otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED);
+        otCoapMessageAppendOption(response, 9, 0, nullptr);
+        otCoapMessageSetPayloadMarker(response);
+        otMessageAppend(response, ciphertext, (uint16_t) cipher_len);
+        otCoapSendResponse(instance, response, message_info);
+      }
+      goto exit;
+    }
+#endif
     SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
     SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
   } else {
@@ -903,11 +1056,52 @@ void CoapServer::handle_observer_(ehCoapObserver *observer, ehCoapResource *expe
                                           OT_COAP_CODE_CONTENT));
   SuccessOrExit(error = otCoapMessageWriteToken(message, &token));
   SuccessOrExit(error = otCoapMessageAppendObserveOption(message, serial));
+#ifdef USE_COAP_OSCORE
+  {
+    // Build inner: [2.05 Content][Content-Format][0xFF][payload]
+    uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
+    size_t inner_len = 0;
+    inner[inner_len++] = 0x45;  // 2.05 Content
+    inner[inner_len++] = 0xC1;  // Content-Format delta=12, len=1
+    inner[inner_len++] = 0x32;  // value=50 (application/cbor)
+    inner[inner_len++] = 0xFF;
+    memcpy(inner + inner_len, payload, payload_len);
+    inner_len += payload_len;
+    // For notifications, req_info.piv/kid are unused (notification nonce uses sender_seq_no_ and sender_id)
+    OscoreRequestInfo dummy{};
+    uint8_t ciphertext[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
+    size_t cipher_len = this->oscore_protect_response_(inner, inner_len, dummy, true, ciphertext, sizeof(ciphertext));
+    if (cipher_len == 0) {
+      error = OT_ERROR_FAILED;
+      goto exit;
+    }
+    // Notification OSCORE option: flags = 0x08 (kid present) | piv_len
+    // Build option value: [flags][piv bytes][kid bytes]
+    uint32_t seq_for_opt = (this->oscore_sender_seq_no_ == 0) ? 0 : (this->oscore_sender_seq_no_ - 1);
+    uint8_t piv_len_opt = (seq_for_opt <= 0xFF) ? 1 : (seq_for_opt <= 0xFFFF) ? 2 : 3;
+    uint8_t oscore_opt[16];
+    uint8_t opt_pos = 0;
+    oscore_opt[opt_pos++] = (uint8_t) (0x08 | piv_len_opt);  // h=0, k=1, n=piv_len
+    if (piv_len_opt == 3)
+      oscore_opt[opt_pos++] = (uint8_t) (seq_for_opt >> 16);
+    if (piv_len_opt >= 2)
+      oscore_opt[opt_pos++] = (uint8_t) (seq_for_opt >> 8);
+    oscore_opt[opt_pos++] = (uint8_t) seq_for_opt;
+    memcpy(oscore_opt + opt_pos, this->oscore_sender_id_buf_, this->oscore_sender_id_len_);
+    opt_pos += this->oscore_sender_id_len_;
+    SuccessOrExit(error = otCoapMessageAppendOption(message, 9, opt_pos, oscore_opt));
+    SuccessOrExit(error = otCoapMessageSetPayloadMarker(message));
+    SuccessOrExit(error = otMessageAppend(message, ciphertext, (uint16_t) cipher_len));
+    SuccessOrExit(error = otCoapSendRequest(instance, message, &msg_info_copy,
+                                            is_con ? CoapServer::handle_notification_ack : nullptr, observer));
+  }
+#else
   SuccessOrExit(error = otCoapMessageAppendContentFormatOption(message, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
   SuccessOrExit(error = otCoapMessageSetPayloadMarker(message));
   SuccessOrExit(error = otMessageAppend(message, payload, (uint16_t) payload_len));
   SuccessOrExit(error = otCoapSendRequest(instance, message, &msg_info_copy,
                                           is_con ? CoapServer::handle_notification_ack : nullptr, observer));
+#endif  // USE_COAP_OSCORE
 exit:
   if (error != OT_ERROR_NONE) {
     ESP_LOGE(TAG, "coap send message error %d: %s", error, otThreadErrorToString(error));
@@ -1201,7 +1395,8 @@ void CoapServer::ping_client_(ehCoapClient *client) {
     {
       std::lock_guard<std::mutex> guard(this->lock_);
       if (client->last_ping_sent_ms != 0) {
-        uint32_t timeout_ms = (uint32_t) (this->client_ping_interval_ms_ * this->client_ping_timeout_ratio_);
+        uint32_t timeout_ms =
+            (uint32_t) std::max((this->client_ping_interval_ms_ * this->client_ping_timeout_ratio_), (float) 1000.0f);
         timed_out = (now - client->last_response_ms > timeout_ms);
         if (timed_out)
           ping_miss_count = ++client->ping_miss_count;
@@ -1424,51 +1619,92 @@ static size_t oscore_build_info_(uint8_t *buf, size_t buf_len, const uint8_t *id
   return cbor_encoder_get_buffer_size(&enc, buf);
 }
 
-bool CoapServer::oscore_derive_keys_() {
-  // HKDF-Extract: PRK = HMAC-SHA-256(master_salt, master_secret)
-  uint8_t prk[32];
-  int ret = mbedtls_hkdf_extract(MBEDTLS_MD_SHA256, this->oscore_master_salt_.data(), this->oscore_master_salt_.size(),
-                                 this->oscore_master_secret_.data(), this->oscore_master_secret_.size(), prk);
-  if (ret != 0) {
-    ESP_LOGE(TAG, "OSCORE HKDF-Extract failed: %d", ret);
-    return false;
-  }
+// PSA Crypto is already initialised by OpenThread; no psa_crypto_init() needed here.
+static bool oscore_hkdf_(const uint8_t *secret, size_t secret_len, const uint8_t *salt, size_t salt_len,
+                         const uint8_t *info, size_t info_len, uint8_t *okm, size_t okm_len) {
+  psa_key_derivation_operation_t op = PSA_KEY_DERIVATION_OPERATION_INIT;
+  psa_status_t s = psa_key_derivation_setup(&op, PSA_ALG_HKDF(PSA_ALG_SHA_256));
+  if (s == PSA_SUCCESS && salt_len > 0)
+    s = psa_key_derivation_input_bytes(&op, PSA_KEY_DERIVATION_INPUT_SALT, salt, salt_len);
+  if (s == PSA_SUCCESS)
+    s = psa_key_derivation_input_bytes(&op, PSA_KEY_DERIVATION_INPUT_SECRET, secret, secret_len);
+  if (s == PSA_SUCCESS)
+    s = psa_key_derivation_input_bytes(&op, PSA_KEY_DERIVATION_INPUT_INFO, info, info_len);
+  if (s == PSA_SUCCESS)
+    s = psa_key_derivation_output_bytes(&op, okm, okm_len);
+  psa_key_derivation_abort(&op);
+  return s == PSA_SUCCESS;
+}
 
+bool CoapServer::oscore_derive_keys_() {
   uint8_t info_buf[64];
   size_t info_len;
+  uint8_t key_buf[OSCORE_KEY_LEN];
 
-  // Sender key
+  // Sender key — derive into local buffer, import as PSA key, then clear
   info_len =
       oscore_build_info_(info_buf, sizeof(info_buf), this->oscore_sender_id_.data(), this->oscore_sender_id_.size(),
                          this->oscore_id_context_.data(), this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
-  if (info_len == 0 || mbedtls_hkdf_expand(MBEDTLS_MD_SHA256, prk, sizeof(prk), info_buf, info_len,
-                                           this->oscore_sender_key_, OSCORE_KEY_LEN) != 0) {
+  if (info_len == 0 || !oscore_hkdf_(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
+                                     this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
+                                     info_len, key_buf, OSCORE_KEY_LEN)) {
     ESP_LOGE(TAG, "OSCORE sender key derivation failed");
     return false;
+  }
+  {
+    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attrs, 128);
+    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_ENCRYPT);
+    psa_set_key_algorithm(&attrs, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN));
+    psa_status_t s = psa_import_key(&attrs, key_buf, OSCORE_KEY_LEN, &this->oscore_sender_key_id_);
+    memset(key_buf, 0, sizeof(key_buf));
+    if (s != PSA_SUCCESS) {
+      ESP_LOGE(TAG, "OSCORE sender key import failed: %d", (int) s);
+      return false;
+    }
   }
 
   // Recipient key
   info_len = oscore_build_info_(info_buf, sizeof(info_buf), this->oscore_recipient_id_.data(),
                                 this->oscore_recipient_id_.size(), this->oscore_id_context_.data(),
                                 this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
-  if (info_len == 0 || mbedtls_hkdf_expand(MBEDTLS_MD_SHA256, prk, sizeof(prk), info_buf, info_len,
-                                           this->oscore_recipient_key_, OSCORE_KEY_LEN) != 0) {
+  if (info_len == 0 || !oscore_hkdf_(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
+                                     this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
+                                     info_len, key_buf, OSCORE_KEY_LEN)) {
     ESP_LOGE(TAG, "OSCORE recipient key derivation failed");
     return false;
   }
+  {
+    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attrs, 128);
+    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_DECRYPT);
+    psa_set_key_algorithm(&attrs, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN));
+    psa_status_t s = psa_import_key(&attrs, key_buf, OSCORE_KEY_LEN, &this->oscore_recipient_key_id_);
+    memset(key_buf, 0, sizeof(key_buf));
+    if (s != PSA_SUCCESS) {
+      ESP_LOGE(TAG, "OSCORE recipient key import failed: %d", (int) s);
+      return false;
+    }
+  }
 
-  // Common IV — id is the empty byte string (RFC 8613 §3.2.1)
+  // Common IV — stored as raw bytes for nonce construction (not an AEAD key)
   info_len = oscore_build_info_(info_buf, sizeof(info_buf), nullptr, 0, this->oscore_id_context_.data(),
                                 this->oscore_id_context_.size(), "IV", OSCORE_IV_LEN);
-  if (info_len == 0 || mbedtls_hkdf_expand(MBEDTLS_MD_SHA256, prk, sizeof(prk), info_buf, info_len,
-                                           this->oscore_common_iv_, OSCORE_IV_LEN) != 0) {
+  if (info_len == 0 || !oscore_hkdf_(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
+                                     this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
+                                     info_len, this->oscore_common_iv_, OSCORE_IV_LEN)) {
     ESP_LOGE(TAG, "OSCORE common IV derivation failed");
     return false;
   }
 
   ESP_LOGI(TAG, "OSCORE keys derived");
 
-  // Key material is no longer needed; release the heap.
+  // Retain sender ID (needed for notification OSCORE option) then release all key material.
+  this->oscore_sender_id_len_ = (uint8_t) std::min(this->oscore_sender_id_.size(), sizeof(this->oscore_sender_id_buf_));
+  memcpy(this->oscore_sender_id_buf_, this->oscore_sender_id_.data(), this->oscore_sender_id_len_);
+
   this->oscore_master_secret_.clear();
   this->oscore_master_secret_.shrink_to_fit();
   this->oscore_master_salt_.clear();
@@ -1481,6 +1717,229 @@ bool CoapServer::oscore_derive_keys_() {
   this->oscore_id_context_.shrink_to_fit();
 
   return true;
+}
+
+// Nonce = [kid_len(1) | padded_kid(nonce_len-6) | padded_piv(5)] XOR common_iv
+void CoapServer::oscore_build_nonce_(const uint8_t *piv, uint8_t piv_len, const uint8_t *kid, uint8_t kid_len,
+                                     const uint8_t *common_iv, uint8_t nonce[OSCORE_IV_LEN]) {
+  uint8_t input[OSCORE_IV_LEN] = {};
+  input[0] = kid_len;
+  // kid right-aligned in bytes 1..(OSCORE_IV_LEN-6)
+  const uint8_t kid_field_len = OSCORE_IV_LEN - 6;
+  if (kid_len <= kid_field_len)
+    memcpy(input + 1 + (kid_field_len - kid_len), kid, kid_len);
+  // piv right-aligned in last 5 bytes
+  if (piv_len <= 5)
+    memcpy(input + OSCORE_IV_LEN - 5 + (5 - piv_len), piv, piv_len);
+  for (uint8_t i = 0; i < OSCORE_IV_LEN; i++)
+    nonce[i] = input[i] ^ common_iv[i];
+}
+
+// AAD = CBOR(["Encrypt0", h'', CBOR([1, [10], kid_bstr, piv_bstr, h''])])
+size_t CoapServer::oscore_build_aad_(const uint8_t *kid, uint8_t kid_len, const uint8_t *piv, uint8_t piv_len,
+                                     uint8_t *buf, size_t buf_len) {
+  // Build inner aad_array first into a temp buffer
+  uint8_t aad_array_buf[32];
+  CborEncoder enc, arr;
+  cbor_encoder_init(&enc, aad_array_buf, sizeof(aad_array_buf), 0);
+  if (cbor_encoder_create_array(&enc, &arr, 5) != CborNoError)
+    return 0;
+  if (cbor_encode_uint(&arr, 1) != CborNoError)  // oscore_version
+    return 0;
+  CborEncoder alg_arr;
+  if (cbor_encoder_create_array(&arr, &alg_arr, 1) != CborNoError)
+    return 0;
+  if (cbor_encode_int(&alg_arr, 10) != CborNoError)  // AES-CCM-16-64-128
+    return 0;
+  if (cbor_encoder_close_container(&arr, &alg_arr) != CborNoError)
+    return 0;
+  if (cbor_encode_byte_string(&arr, kid, kid_len) != CborNoError)
+    return 0;
+  if (cbor_encode_byte_string(&arr, piv, piv_len) != CborNoError)
+    return 0;
+  static const uint8_t kEmpty[1] = {};
+  if (cbor_encode_byte_string(&arr, kEmpty, 0) != CborNoError)  // class-I options (empty)
+    return 0;
+  if (cbor_encoder_close_container(&enc, &arr) != CborNoError)
+    return 0;
+  size_t aad_array_len = cbor_encoder_get_buffer_size(&enc, aad_array_buf);
+
+  // Enc_Structure = ["Encrypt0", h'', aad_array_bstr]
+  CborEncoder outer, outer_arr;
+  cbor_encoder_init(&outer, buf, buf_len, 0);
+  if (cbor_encoder_create_array(&outer, &outer_arr, 3) != CborNoError)
+    return 0;
+  if (cbor_encode_text_stringz(&outer_arr, "Encrypt0") != CborNoError)
+    return 0;
+  if (cbor_encode_byte_string(&outer_arr, kEmpty, 0) != CborNoError)
+    return 0;
+  if (cbor_encode_byte_string(&outer_arr, aad_array_buf, aad_array_len) != CborNoError)
+    return 0;
+  if (cbor_encoder_close_container(&outer, &outer_arr) != CborNoError)
+    return 0;
+  return cbor_encoder_get_buffer_size(&outer, buf);
+}
+
+// Parse incoming message for OSCORE option, decrypt, return inner CoAP bytes.
+// Returns true (and empty plaintext_len) for exempt resources without checking.
+// Returns false and logs if OSCORE required but absent or decryption fails.
+bool CoapServer::oscore_unprotect_request_(otMessage *message, const ehCoapResource *resource, uint8_t *plaintext,
+                                           size_t *plaintext_len, OscoreRequestInfo *req_info) {
+  *plaintext_len = 0;
+  if (resource->oscore_exempt)
+    return true;
+
+  // Find OSCORE option (option number 9)
+  otCoapOptionIterator iter;
+  otCoapOptionIteratorInit(&iter, message);
+  const otCoapOption *oscore_opt = otCoapOptionIteratorGetFirstOptionMatching(&iter, 9);
+  if (oscore_opt == nullptr) {
+    ESP_LOGW(TAG, "OSCORE: request on protected resource without OSCORE option");
+    return false;
+  }
+
+  // Parse OSCORE option value
+  uint8_t opt_val[32];
+  uint16_t opt_len = oscore_opt->mLength;
+  if (opt_len > sizeof(opt_val))
+    return false;
+  if (opt_len > 0)
+    otCoapOptionIteratorGetOptionValue(&iter, opt_val);
+
+  uint8_t flags = (opt_len > 0) ? opt_val[0] : 0;
+  uint8_t piv_len = flags & 0x07;
+  bool has_kid_ctx = (flags >> 3) & 1;
+  bool has_kid = (flags >> 2) & 1;
+
+  uint8_t pos = (opt_len > 0) ? 1u : 0u;
+  // Partial IV
+  if (piv_len > 0) {
+    if (pos + piv_len > opt_len)
+      return false;
+    memcpy(req_info->piv, opt_val + pos, piv_len);
+    pos += piv_len;
+  }
+  req_info->piv_len = piv_len;
+  // KID Context (skip)
+  if (has_kid_ctx) {
+    if (pos >= opt_len)
+      return false;
+    uint8_t ctx_len = opt_val[pos++];
+    pos += ctx_len;
+  }
+  // KID (sender ID from client)
+  req_info->kid_len = 0;
+  if (has_kid) {
+    uint8_t kid_len = (uint8_t) (opt_len - pos);
+    if (kid_len > sizeof(req_info->kid))
+      return false;
+    memcpy(req_info->kid, opt_val + pos, kid_len);
+    req_info->kid_len = kid_len;
+  }
+
+  // Basic replay check: sequence number must be increasing
+  uint32_t seq = 0;
+  for (uint8_t i = 0; i < piv_len; i++)
+    seq = (seq << 8) | req_info->piv[i];
+  if (piv_len > 0 && seq <= this->oscore_last_seen_seq_ && this->oscore_last_seen_seq_ != 0) {
+    ESP_LOGW(TAG, "OSCORE: replayed sequence number %" PRIu32, seq);
+    return false;
+  }
+
+  // Build nonce and AAD
+  uint8_t nonce[OSCORE_IV_LEN];
+  oscore_build_nonce_(req_info->piv, piv_len, req_info->kid, req_info->kid_len, this->oscore_common_iv_, nonce);
+  uint8_t aad_buf[80];
+  size_t aad_len =
+      oscore_build_aad_(req_info->kid, req_info->kid_len, req_info->piv, piv_len, aad_buf, sizeof(aad_buf));
+  if (aad_len == 0) {
+    ESP_LOGE(TAG, "OSCORE: AAD build failed");
+    return false;
+  }
+
+  // Read ciphertext from message payload
+  uint16_t msg_offset = otMessageGetOffset(message);
+  uint16_t ciphertext_len = otMessageGetLength(message) - msg_offset;
+  if (ciphertext_len == 0 || ciphertext_len > 256) {
+    ESP_LOGW(TAG, "OSCORE: unexpected ciphertext length %u", ciphertext_len);
+    return false;
+  }
+  uint8_t ciphertext[256];
+  otMessageRead(message, msg_offset, ciphertext, ciphertext_len);
+
+  // Decrypt
+  size_t out_len = 0;
+  psa_status_t s =
+      psa_aead_decrypt(this->oscore_recipient_key_id_, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN),
+                       nonce, OSCORE_IV_LEN, aad_buf, aad_len, ciphertext, ciphertext_len, plaintext, 256, &out_len);
+  if (s != PSA_SUCCESS) {
+    ESP_LOGW(TAG, "OSCORE: decryption failed: %d", (int) s);
+    return false;
+  }
+
+  if (piv_len > 0)
+    this->oscore_last_seen_seq_ = seq;
+  *plaintext_len = out_len;
+  ESP_LOGD(TAG, "OSCORE: request decrypted (seq=%" PRIu32 " plaintext=%u bytes)", seq, (unsigned) out_len);
+  return true;
+}
+
+// Encrypt inner CoAP bytes (code + options + payload) into out_buf.
+// Returns 0 on failure. For notifications, advances sender_seq_no_.
+size_t CoapServer::oscore_protect_response_(const uint8_t *inner, size_t inner_len, const OscoreRequestInfo &req_info,
+                                            bool is_notification, uint8_t *out_buf, size_t out_buf_len) {
+  uint8_t piv[5];
+  uint8_t piv_len = 0;
+  uint8_t kid[8];
+  uint8_t kid_len = 0;
+
+  if (is_notification) {
+    // Use server's sequence number as PIV; encode as minimal big-endian bytes
+    uint32_t seq = this->oscore_sender_seq_no_;
+    if (seq <= 0xFF) {
+      piv[0] = (uint8_t) seq;
+      piv_len = 1;
+    } else if (seq <= 0xFFFF) {
+      piv[0] = (uint8_t) (seq >> 8);
+      piv[1] = (uint8_t) seq;
+      piv_len = 2;
+    } else {
+      piv[0] = (uint8_t) (seq >> 16);
+      piv[1] = (uint8_t) (seq >> 8);
+      piv[2] = (uint8_t) seq;
+      piv_len = 3;
+    }
+    // Notification nonce uses server's sender_id as KID
+    memcpy(kid, this->oscore_sender_id_buf_, this->oscore_sender_id_len_);
+    kid_len = this->oscore_sender_id_len_;
+    this->oscore_increment_seq_no_();
+  } else {
+    // Simple response: reuse the request's PIV and KID for nonce (RFC 8613 §8.3)
+    memcpy(piv, req_info.piv, req_info.piv_len);
+    piv_len = req_info.piv_len;
+    memcpy(kid, req_info.kid, req_info.kid_len);
+    kid_len = req_info.kid_len;
+  }
+
+  uint8_t nonce[OSCORE_IV_LEN];
+  oscore_build_nonce_(piv, piv_len, kid, kid_len, this->oscore_common_iv_, nonce);
+  uint8_t aad_buf[80];
+  size_t aad_len =
+      oscore_build_aad_(req_info.kid, req_info.kid_len, req_info.piv, req_info.piv_len, aad_buf, sizeof(aad_buf));
+  if (aad_len == 0)
+    return 0;
+
+  size_t out_len = 0;
+  psa_status_t s =
+      psa_aead_encrypt(this->oscore_sender_key_id_, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN), nonce,
+                       OSCORE_IV_LEN, aad_buf, aad_len, inner, inner_len, out_buf, out_buf_len, &out_len);
+  if (s != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "OSCORE: encryption failed: %d", (int) s);
+    return 0;
+  }
+  ESP_LOGD(TAG, "OSCORE: response encrypted (%s ciphertext=%u bytes)", is_notification ? "notification" : "reply",
+           (unsigned) out_len);
+  return out_len;
 }
 
 void CoapServer::oscore_save_seq_no_() {
