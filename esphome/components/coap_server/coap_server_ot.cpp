@@ -1641,7 +1641,7 @@ bool CoapServer::oscore_derive_keys_() {
   size_t info_len;
   uint8_t key_buf[OSCORE_KEY_LEN];
 
-  // Sender key — derive into local buffer, import as PSA key, then clear
+  // Sender key — derive and store raw bytes; imported as transient PSA key per encrypt call
   info_len =
       oscore_build_info_(info_buf, sizeof(info_buf), this->oscore_sender_id_.data(), this->oscore_sender_id_.size(),
                          this->oscore_id_context_.data(), this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
@@ -1651,21 +1651,10 @@ bool CoapServer::oscore_derive_keys_() {
     ESP_LOGE(TAG, "OSCORE sender key derivation failed");
     return false;
   }
-  {
-    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
-    psa_set_key_bits(&attrs, 128);
-    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_ENCRYPT);
-    psa_set_key_algorithm(&attrs, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN));
-    psa_status_t s = psa_import_key(&attrs, key_buf, OSCORE_KEY_LEN, &this->oscore_sender_key_id_);
-    memset(key_buf, 0, sizeof(key_buf));
-    if (s != PSA_SUCCESS) {
-      ESP_LOGE(TAG, "OSCORE sender key import failed: %d", (int) s);
-      return false;
-    }
-  }
+  memcpy(this->oscore_sender_key_, key_buf, OSCORE_KEY_LEN);
+  memset(key_buf, 0, sizeof(key_buf));
 
-  // Recipient key
+  // Recipient key — derive and store raw bytes; imported as transient PSA key per decrypt call
   info_len = oscore_build_info_(info_buf, sizeof(info_buf), this->oscore_recipient_id_.data(),
                                 this->oscore_recipient_id_.size(), this->oscore_id_context_.data(),
                                 this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
@@ -1675,19 +1664,8 @@ bool CoapServer::oscore_derive_keys_() {
     ESP_LOGE(TAG, "OSCORE recipient key derivation failed");
     return false;
   }
-  {
-    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
-    psa_set_key_bits(&attrs, 128);
-    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_DECRYPT);
-    psa_set_key_algorithm(&attrs, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN));
-    psa_status_t s = psa_import_key(&attrs, key_buf, OSCORE_KEY_LEN, &this->oscore_recipient_key_id_);
-    memset(key_buf, 0, sizeof(key_buf));
-    if (s != PSA_SUCCESS) {
-      ESP_LOGE(TAG, "OSCORE recipient key import failed: %d", (int) s);
-      return false;
-    }
-  }
+  memcpy(this->oscore_recipient_key_, key_buf, OSCORE_KEY_LEN);
+  memset(key_buf, 0, sizeof(key_buf));
 
   // Common IV — stored as raw bytes for nonce construction (not an AEAD key)
   info_len = oscore_build_info_(info_buf, sizeof(info_buf), nullptr, 0, this->oscore_id_context_.data(),
@@ -1867,14 +1845,27 @@ bool CoapServer::oscore_unprotect_request_(otMessage *message, const ehCoapResou
   uint8_t ciphertext[256];
   otMessageRead(message, msg_offset, ciphertext, ciphertext_len);
 
-  // Decrypt
+  // Decrypt — import transient key, use once, destroy immediately (avoids PSA context resets by OpenThread)
   size_t out_len = 0;
-  psa_status_t s =
-      psa_aead_decrypt(this->oscore_recipient_key_id_, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN),
-                       nonce, OSCORE_IV_LEN, aad_buf, aad_len, ciphertext, ciphertext_len, plaintext, 256, &out_len);
-  if (s != PSA_SUCCESS) {
-    ESP_LOGW(TAG, "OSCORE: decryption failed: %d", (int) s);
-    return false;
+  {
+    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attrs, 128);
+    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_DECRYPT);
+    psa_set_key_algorithm(&attrs, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN));
+    psa_key_id_t key_id = PSA_KEY_ID_NULL;
+    psa_status_t s = psa_import_key(&attrs, this->oscore_recipient_key_, OSCORE_KEY_LEN, &key_id);
+    if (s != PSA_SUCCESS) {
+      ESP_LOGE(TAG, "OSCORE: recipient key import failed: %d", (int) s);
+      return false;
+    }
+    s = psa_aead_decrypt(key_id, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN), nonce, OSCORE_IV_LEN,
+                         aad_buf, aad_len, ciphertext, ciphertext_len, plaintext, 256, &out_len);
+    psa_destroy_key(key_id);
+    if (s != PSA_SUCCESS) {
+      ESP_LOGW(TAG, "OSCORE: decryption failed: %d", (int) s);
+      return false;
+    }
   }
 
   if (piv_len > 0)
@@ -1929,13 +1920,27 @@ size_t CoapServer::oscore_protect_response_(const uint8_t *inner, size_t inner_l
   if (aad_len == 0)
     return 0;
 
+  // Encrypt — import transient key, use once, destroy immediately
   size_t out_len = 0;
-  psa_status_t s =
-      psa_aead_encrypt(this->oscore_sender_key_id_, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN), nonce,
-                       OSCORE_IV_LEN, aad_buf, aad_len, inner, inner_len, out_buf, out_buf_len, &out_len);
-  if (s != PSA_SUCCESS) {
-    ESP_LOGE(TAG, "OSCORE: encryption failed: %d", (int) s);
-    return 0;
+  {
+    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attrs, 128);
+    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_ENCRYPT);
+    psa_set_key_algorithm(&attrs, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN));
+    psa_key_id_t key_id = PSA_KEY_ID_NULL;
+    psa_status_t s = psa_import_key(&attrs, this->oscore_sender_key_, OSCORE_KEY_LEN, &key_id);
+    if (s != PSA_SUCCESS) {
+      ESP_LOGE(TAG, "OSCORE: sender key import failed: %d", (int) s);
+      return 0;
+    }
+    s = psa_aead_encrypt(key_id, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN), nonce, OSCORE_IV_LEN,
+                         aad_buf, aad_len, inner, inner_len, out_buf, out_buf_len, &out_len);
+    psa_destroy_key(key_id);
+    if (s != PSA_SUCCESS) {
+      ESP_LOGE(TAG, "OSCORE: encryption failed: %d", (int) s);
+      return 0;
+    }
   }
   ESP_LOGD(TAG, "OSCORE: response encrypted (%s ciphertext=%u bytes)", is_notification ? "notification" : "reply",
            (unsigned) out_len);

@@ -251,9 +251,9 @@ class CoapServer final : public Component, public Controller {
   static constexpr size_t OSCORE_IV_LEN = 13;
   static constexpr size_t OSCORE_TAG_LEN = 8;
 
-  // Derived keys imported as volatile PSA key objects
-  psa_key_id_t oscore_sender_key_id_{PSA_KEY_ID_NULL};
-  psa_key_id_t oscore_recipient_key_id_{PSA_KEY_ID_NULL};
+  // Raw derived key bytes — imported as transient PSA keys per operation
+  uint8_t oscore_sender_key_[OSCORE_KEY_LEN]{};
+  uint8_t oscore_recipient_key_[OSCORE_KEY_LEN]{};
   uint8_t oscore_common_iv_[OSCORE_IV_LEN]{};
 
   static constexpr uint32_t OSCORE_SEQ_INTERVAL = 1024;
