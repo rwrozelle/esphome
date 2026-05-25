@@ -1808,8 +1808,8 @@ bool CoapServer::oscore_unprotect_request_(otMessage *message, const ehCoapResou
 
   uint8_t flags = (opt_len > 0) ? opt_val[0] : 0;
   uint8_t piv_len = flags & 0x07;
-  bool has_kid_ctx = (flags >> 3) & 1;
-  bool has_kid = (flags >> 2) & 1;
+  bool has_kid_ctx = (flags >> 4) & 1;  // RFC 8613 Table 1: bit 4 = h (KID Context flag)
+  bool has_kid = (flags >> 3) & 1;      // RFC 8613 Table 1: bit 3 = k (KID flag)
 
   uint8_t pos = (opt_len > 0) ? 1u : 0u;
   // Partial IV
