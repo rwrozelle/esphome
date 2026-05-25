@@ -1794,7 +1794,7 @@ bool CoapServer::oscore_unprotect_request_(otMessage *message, const ehCoapResou
   otCoapOptionIteratorInit(&iter, message);
   const otCoapOption *oscore_opt = otCoapOptionIteratorGetFirstOptionMatching(&iter, 9);
   if (oscore_opt == nullptr) {
-    ESP_LOGW(TAG, "OSCORE: request on protected resource without OSCORE option");
+    ESP_LOGW(TAG, "OSCORE: request on protected resource /%s without OSCORE option", resource->mUriPath);
     return false;
   }
 
