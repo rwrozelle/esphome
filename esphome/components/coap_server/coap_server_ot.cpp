@@ -521,7 +521,7 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
 #ifdef USE_COAP_OSCORE
   const otCoapCode effective_code =
       oscore_protected ? static_cast<otCoapCode>(oscore_plain[0]) : otCoapMessageGetCode(message);
-  ESP_LOGI(TAG, "OSCORE handler: path=%s protected=%d plain_len=%u effective_code=0x%02x", resource->mUriPath,
+  ESP_LOGV(TAG, "OSCORE handler: path=%s protected=%d plain_len=%u effective_code=0x%02x", resource->mUriPath,
            (int) oscore_protected, (unsigned) oscore_plain_len, (int) effective_code);
 #else
   const otCoapCode effective_code = otCoapMessageGetCode(message);
@@ -1999,7 +1999,7 @@ size_t CoapServer::oscore_protect_response_(const uint8_t *inner, size_t inner_l
       return 0;
     }
   }
-  ESP_LOGD(TAG, "OSCORE: response encrypted (%s ciphertext=%u bytes)", is_notification ? "notification" : "reply",
+  ESP_LOGV(TAG, "OSCORE: response encrypted (%s ciphertext=%u bytes)", is_notification ? "notification" : "reply",
            (unsigned) out_len);
   return out_len;
 }
