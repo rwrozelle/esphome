@@ -521,6 +521,8 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
 #ifdef USE_COAP_OSCORE
   const otCoapCode effective_code =
       oscore_protected ? static_cast<otCoapCode>(oscore_plain[0]) : otCoapMessageGetCode(message);
+  ESP_LOGI(TAG, "OSCORE handler: path=%s protected=%d plain_len=%u effective_code=0x%02x", resource->mUriPath,
+           (int) oscore_protected, (unsigned) oscore_plain_len, (int) effective_code);
 #else
   const otCoapCode effective_code = otCoapMessageGetCode(message);
 #endif
@@ -549,6 +551,8 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
         if (observe == 0) {
           bool is_con = (otCoapMessageGetType(message) == OT_COAP_TYPE_CONFIRMABLE);
           if (this->get_subscription_confirm() != is_con) {
+            ESP_LOGW(TAG, "OSCORE: CON/NON mismatch for %s: server_confirm=%d client_is_con=%d", resource->mUriPath,
+                     (int) this->get_subscription_confirm(), (int) is_con);
             SuccessOrExit(
                 error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_BAD_REQUEST));
             SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
@@ -587,6 +591,7 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
     }
     payload_len = cbor_output_(payload_buffer, observer != nullptr ? observer->resource : resource);
     if (payload_len == 0) {
+      ESP_LOGW(TAG, "OSCORE: cbor_output_ returned 0 for path=%s type=%d", resource->mUriPath, (int) resource->type);
       SuccessOrExit(
           error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
       SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
@@ -790,6 +795,8 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
     SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
     SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
   } else {
+    ESP_LOGW(TAG, "OSCORE: Method Not Allowed for path=%s effective_code=0x%02x", resource->mUriPath,
+             (int) effective_code);
     SuccessOrExit(
         error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_METHOD_NOT_ALLOWED));
     SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
@@ -805,6 +812,8 @@ exit:
 // static handler for all entity types except button
 void CoapServer::handle_entity_request(void *context, otMessage *message, const otMessageInfo *message_info) {
   ehCoapResource *resource = static_cast<ehCoapResource *>(context);
+  ESP_LOGV(TAG, "entity handler invoked: path=%s outer_code=0x%02x", resource->mUriPath,
+           (int) otCoapMessageGetCode(message));
   resource->server->handle_entity_request(resource, message, message_info, resource->type);
 }
 
@@ -1779,8 +1788,10 @@ bool CoapServer::oscore_unprotect_request_(otMessage *message, const ehCoapResou
   // Parse OSCORE option value
   uint8_t opt_val[32];
   uint16_t opt_len = oscore_opt->mLength;
-  if (opt_len > sizeof(opt_val))
+  if (opt_len > sizeof(opt_val)) {
+    ESP_LOGW(TAG, "OSCORE: option value too long (%u bytes)", opt_len);
     return false;
+  }
   if (opt_len > 0)
     otCoapOptionIteratorGetOptionValue(&iter, opt_val);
 
@@ -1792,16 +1803,20 @@ bool CoapServer::oscore_unprotect_request_(otMessage *message, const ehCoapResou
   uint8_t pos = (opt_len > 0) ? 1u : 0u;
   // Partial IV
   if (piv_len > 0) {
-    if (pos + piv_len > opt_len)
+    if (pos + piv_len > opt_len) {
+      ESP_LOGW(TAG, "OSCORE: PIV overflow pos=%u piv_len=%u opt_len=%u", pos, piv_len, opt_len);
       return false;
+    }
     memcpy(req_info->piv, opt_val + pos, piv_len);
     pos += piv_len;
   }
   req_info->piv_len = piv_len;
   // KID Context (skip)
   if (has_kid_ctx) {
-    if (pos >= opt_len)
+    if (pos >= opt_len) {
+      ESP_LOGW(TAG, "OSCORE: KID context overflow pos=%u opt_len=%u", pos, opt_len);
       return false;
+    }
     uint8_t ctx_len = opt_val[pos++];
     pos += ctx_len;
   }
@@ -1815,13 +1830,20 @@ bool CoapServer::oscore_unprotect_request_(otMessage *message, const ehCoapResou
     req_info->kid_len = kid_len;
   }
 
-  // Basic replay check: sequence number must be increasing
+  // Sliding-window replay check (64-entry, RFC 8613 §7.4).
+  // Window is updated only after successful AEAD decryption to prevent poisoning
+  // via forged packets with high sequence numbers.
   uint32_t seq = 0;
   for (uint8_t i = 0; i < piv_len; i++)
     seq = (seq << 8) | req_info->piv[i];
-  if (piv_len > 0 && seq <= this->oscore_last_seen_seq_ && this->oscore_last_seen_seq_ != 0) {
-    ESP_LOGW(TAG, "OSCORE: replayed sequence number %" PRIu32, seq);
-    return false;
+  if (piv_len > 0 && this->oscore_replay_mask_ != 0) {
+    if (seq <= this->oscore_replay_top_) {
+      uint32_t offset = this->oscore_replay_top_ - seq;
+      if (offset >= 64 || (this->oscore_replay_mask_ & (1ULL << offset))) {
+        ESP_LOGW(TAG, "OSCORE: replayed sequence number %" PRIu32, seq);
+        return false;
+      }
+    }
   }
 
   // Build nonce and AAD
@@ -1846,6 +1868,17 @@ bool CoapServer::oscore_unprotect_request_(otMessage *message, const ehCoapResou
   otMessageRead(message, msg_offset, ciphertext, ciphertext_len);
 
   // Decrypt — import transient key, use once, destroy immediately (avoids PSA context resets by OpenThread)
+  ESP_LOGV(TAG, "OSCORE decrypt: piv_len=%u kid_len=%u cipher_len=%u", piv_len, req_info->kid_len,
+           (unsigned) ciphertext_len);
+  ESP_LOG_BUFFER_HEX_LEVEL(TAG, req_info->piv, piv_len, ESP_LOG_VERBOSE);
+  ESP_LOGV(TAG, "OSCORE kid:");
+  ESP_LOG_BUFFER_HEX_LEVEL(TAG, req_info->kid, req_info->kid_len, ESP_LOG_VERBOSE);
+  ESP_LOGV(TAG, "OSCORE nonce:");
+  ESP_LOG_BUFFER_HEX_LEVEL(TAG, nonce, OSCORE_IV_LEN, ESP_LOG_VERBOSE);
+  ESP_LOGV(TAG, "OSCORE aad (%u bytes):", (unsigned) aad_len);
+  ESP_LOG_BUFFER_HEX_LEVEL(TAG, aad_buf, aad_len, ESP_LOG_VERBOSE);
+  ESP_LOGV(TAG, "OSCORE recipient_key:");
+  ESP_LOG_BUFFER_HEX_LEVEL(TAG, this->oscore_recipient_key_, OSCORE_KEY_LEN, ESP_LOG_VERBOSE);
   size_t out_len = 0;
   {
     psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
@@ -1868,8 +1901,19 @@ bool CoapServer::oscore_unprotect_request_(otMessage *message, const ehCoapResou
     }
   }
 
-  if (piv_len > 0)
-    this->oscore_last_seen_seq_ = seq;
+  if (piv_len > 0) {
+    if (this->oscore_replay_mask_ == 0 || seq > this->oscore_replay_top_) {
+      if (this->oscore_replay_mask_ != 0) {
+        uint32_t shift = seq - this->oscore_replay_top_;
+        this->oscore_replay_mask_ = (shift < 64) ? (this->oscore_replay_mask_ << shift) : 0;
+      }
+      this->oscore_replay_top_ = seq;
+      this->oscore_replay_mask_ |= 1ULL;
+    } else {
+      uint32_t offset = this->oscore_replay_top_ - seq;
+      this->oscore_replay_mask_ |= (1ULL << offset);
+    }
+  }
   *plaintext_len = out_len;
   ESP_LOGD(TAG, "OSCORE: request decrypted (seq=%" PRIu32 " plaintext=%u bytes)", seq, (unsigned) out_len);
   return true;

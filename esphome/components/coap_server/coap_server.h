@@ -259,7 +259,8 @@ class CoapServer final : public Component, public Controller {
   static constexpr uint32_t OSCORE_SEQ_INTERVAL = 1024;
   uint32_t oscore_sender_seq_no_{0};
   uint32_t oscore_seq_threshold_{0};
-  uint32_t oscore_last_seen_seq_{0};
+  uint32_t oscore_replay_top_{0};
+  uint64_t oscore_replay_mask_{0};  // bit i = (top - i) was received; 64-entry window
 
   // Sender ID retained after key derivation for notification OSCORE option
   uint8_t oscore_sender_id_buf_[8]{};
