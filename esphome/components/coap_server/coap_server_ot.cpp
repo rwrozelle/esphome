@@ -573,6 +573,14 @@ void CoapServer::handle_entity_request(ehCoapResource *resource, otMessage *mess
           otCoapToken token;
           SuccessOrExit(error = otCoapMessageReadToken(message, &token));
           obs = this->new_observer_(resource, *message_info, token, otCoapMessageGetType(message));
+#ifdef USE_COAP_OSCORE
+          if (obs != nullptr && oscore_protected) {
+            memcpy(obs->oscore_req_piv, oscore_req_info.piv, oscore_req_info.piv_len);
+            obs->oscore_req_piv_len = oscore_req_info.piv_len;
+            memcpy(obs->oscore_req_kid, oscore_req_info.kid, oscore_req_info.kid_len);
+            obs->oscore_req_kid_len = oscore_req_info.kid_len;
+          }
+#endif
           bool client_known;
           {
             std::lock_guard<std::mutex> guard(this->lock_);
@@ -1076,10 +1084,15 @@ void CoapServer::handle_observer_(ehCoapObserver *observer, ehCoapResource *expe
     inner[inner_len++] = 0xFF;
     memcpy(inner + inner_len, payload, payload_len);
     inner_len += payload_len;
-    // For notifications, req_info.piv/kid are unused (notification nonce uses sender_seq_no_ and sender_id)
-    OscoreRequestInfo dummy{};
+    // AAD uses the original registration request's KID/PIV per RFC 8613 §8.3
+    OscoreRequestInfo aad_info{};
+    memcpy(aad_info.piv, observer->oscore_req_piv, observer->oscore_req_piv_len);
+    aad_info.piv_len = observer->oscore_req_piv_len;
+    memcpy(aad_info.kid, observer->oscore_req_kid, observer->oscore_req_kid_len);
+    aad_info.kid_len = observer->oscore_req_kid_len;
     uint8_t ciphertext[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
-    size_t cipher_len = this->oscore_protect_response_(inner, inner_len, dummy, true, ciphertext, sizeof(ciphertext));
+    size_t cipher_len =
+        this->oscore_protect_response_(inner, inner_len, aad_info, true, ciphertext, sizeof(ciphertext));
     if (cipher_len == 0) {
       error = OT_ERROR_FAILED;
       goto exit;

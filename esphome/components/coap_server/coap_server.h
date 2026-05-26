@@ -87,6 +87,13 @@ struct ehCoapObserver {
   otCoapType obs_type{OT_COAP_TYPE_NON_CONFIRMABLE};
   uint8_t notify_count{0};
   bool con_pending{false};
+#ifdef USE_COAP_OSCORE
+  // Registration request KID/PIV — used as External AAD request_kid/request_piv per RFC 8613 §8.3
+  uint8_t oscore_req_piv[5]{};
+  uint8_t oscore_req_piv_len{0};
+  uint8_t oscore_req_kid[8]{};
+  uint8_t oscore_req_kid_len{0};
+#endif
 };
 
 #endif  // USE_OPENTHREAD
