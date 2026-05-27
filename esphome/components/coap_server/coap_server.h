@@ -127,6 +127,8 @@ class CoapServer final : public Component, public Controller {
   uint8_t get_client_ping_retry() const { return this->client_ping_retry_; }
   void set_subscription_confirm(bool confirm) { this->subscription_confirm_ = confirm; }
   bool get_subscription_confirm() const { return this->subscription_confirm_; }
+  void set_observe_retry(uint8_t retry) { this->observe_retry_ = retry; }
+  uint8_t get_observe_retry() const { return this->observe_retry_; }
 
 #ifdef USE_OPENTHREAD
   static void handle_well_known_core(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
@@ -198,6 +200,7 @@ class CoapServer final : public Component, public Controller {
   float client_ping_timeout_ratio_{2.5f};
   uint8_t client_ping_retry_{1};
   bool subscription_confirm_{false};
+  uint8_t observe_retry_{0};
 
   static size_t encode_device_info_(uint8_t *buf, size_t buf_len, CoapServer *server);
 

@@ -217,7 +217,7 @@ static CborError encode_device_info_impl(uint8_t *buf, size_t buf_len, size_t *e
   const uint8_t area_count = 0;
 #endif
   CBOR_CHECK(cbor_encoder_create_map(&enc, &map,
-                                     (has_friendly ? 10 : 9) + (area_count > 0 ? 1 : 0) + (device_count > 0 ? 1 : 0)));
+                                     (has_friendly ? 11 : 10) + (area_count > 0 ? 1 : 0) + (device_count > 0 ? 1 : 0)));
   CBOR_CHECK(cbor_encode_text_stringz(&map, "name"));
   const StringRef &name = App.get_name();
   CBOR_CHECK(cbor_encode_text_string(&map, name.c_str(), name.size()));
@@ -245,6 +245,8 @@ static CborError encode_device_info_impl(uint8_t *buf, size_t buf_len, size_t *e
 #endif
   CBOR_CHECK(cbor_encode_text_stringz(&map, "subscription_confirm"));
   CBOR_CHECK(cbor_encode_boolean(&map, server->get_subscription_confirm()));
+  CBOR_CHECK(cbor_encode_text_stringz(&map, "observe_retry"));
+  CBOR_CHECK(cbor_encode_uint(&map, server->get_observe_retry()));
   if (has_friendly) {
     CBOR_CHECK(cbor_encode_text_stringz(&map, "friendly_name"));
     CBOR_CHECK(cbor_encode_text_string(&map, friendly.c_str(), friendly.size()));

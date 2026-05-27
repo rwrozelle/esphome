@@ -20,6 +20,7 @@ from .const import (
     CONF_ID_CONTEXT,
     CONF_MASTER_SALT,
     CONF_MASTER_SECRET,
+    CONF_OBSERVE_RETRY,
     CONF_OSCORE,
     CONF_RECIPIENT_ID,
     CONF_SENDER_ID,
@@ -89,37 +90,88 @@ OSCORE_SCHEMA = cv.All(
     _validate_oscore,
 )
 
+_PING_KEYS = (
+    CONF_SERVER_PING_INTERVAL,
+    CONF_SERVER_PING_TIMEOUT_RATIO,
+    CONF_SERVER_PING_RETRY,
+    CONF_CLIENT_PING_INTERVAL,
+    CONF_CLIENT_PING_TIMEOUT_RATIO,
+    CONF_CLIENT_PING_RETRY,
+)
+
+
+def _validate_subscription_mode(config):
+    confirm = config.get(CONF_SUBSCRIPTION_CONFIRM, False)
+    if confirm:
+        for key in _PING_KEYS:
+            if key in config:
+                raise cv.Invalid(
+                    f"'{key}' cannot be set when '{CONF_SUBSCRIPTION_CONFIRM}' is true; "
+                    "ping is not used in CON observe mode",
+                    path=[key],
+                )
+        config.setdefault(
+            CONF_SERVER_PING_INTERVAL, cv.positive_time_period_milliseconds("60s")
+        )
+        config.setdefault(CONF_SERVER_PING_TIMEOUT_RATIO, 2.5)
+        config.setdefault(CONF_SERVER_PING_RETRY, 1)
+        config.setdefault(
+            CONF_CLIENT_PING_INTERVAL, cv.positive_time_period_milliseconds("60s")
+        )
+        config.setdefault(CONF_CLIENT_PING_TIMEOUT_RATIO, 2.5)
+        config.setdefault(CONF_CLIENT_PING_RETRY, 1)
+        config.setdefault(CONF_OBSERVE_RETRY, 1)
+    else:
+        if CONF_OBSERVE_RETRY in config:
+            raise cv.Invalid(
+                f"'{CONF_OBSERVE_RETRY}' can only be set when '{CONF_SUBSCRIPTION_CONFIRM}' is true",
+                path=[CONF_OBSERVE_RETRY],
+            )
+        config.setdefault(
+            CONF_SERVER_PING_INTERVAL, cv.positive_time_period_milliseconds("60s")
+        )
+        config.setdefault(CONF_SERVER_PING_TIMEOUT_RATIO, 2.5)
+        config.setdefault(CONF_SERVER_PING_RETRY, 1)
+        config.setdefault(
+            CONF_CLIENT_PING_INTERVAL, cv.positive_time_period_milliseconds("60s")
+        )
+        config.setdefault(CONF_CLIENT_PING_TIMEOUT_RATIO, 2.5)
+        config.setdefault(CONF_CLIENT_PING_RETRY, 1)
+        config.setdefault(CONF_OBSERVE_RETRY, 0)
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.only_on_esp32,
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(CoapServer),
             cv.Optional(CONF_PORT, default=5683): cv.uint16_t,
-            # Sent to Client in /info so they know how often to check if Server is alive
-            cv.Optional(CONF_SERVER_PING_INTERVAL, default="60s"): cv.All(
+            # Only valid when subscription_confirm is false (NON observe mode)
+            cv.Optional(CONF_SERVER_PING_INTERVAL): cv.All(
                 cv.positive_time_period_milliseconds,
                 cv.Range(min=cv.TimePeriod(seconds=20)),
             ),
-            cv.Optional(CONF_SERVER_PING_TIMEOUT_RATIO, default=2.5): cv.All(
+            cv.Optional(CONF_SERVER_PING_TIMEOUT_RATIO): cv.All(
                 cv.float_, cv.Range(min=0.01)
             ),
-            cv.Optional(CONF_SERVER_PING_RETRY, default=1): cv.int_range(min=1, max=5),
-            # Used by Server to check if client is still alive
-            cv.Optional(CONF_CLIENT_PING_INTERVAL, default="60s"): cv.All(
+            cv.Optional(CONF_SERVER_PING_RETRY): cv.int_range(min=1, max=5),
+            cv.Optional(CONF_CLIENT_PING_INTERVAL): cv.All(
                 cv.positive_time_period_milliseconds,
                 cv.Range(min=cv.TimePeriod(seconds=60)),
             ),
-            cv.Optional(CONF_CLIENT_PING_TIMEOUT_RATIO, default=2.5): cv.All(
+            cv.Optional(CONF_CLIENT_PING_TIMEOUT_RATIO): cv.All(
                 cv.float_, cv.Range(min=0.01)
             ),
-            cv.Optional(CONF_CLIENT_PING_RETRY, default=1): cv.int_range(min=1, max=5),
+            cv.Optional(CONF_CLIENT_PING_RETRY): cv.int_range(min=1, max=5),
             # Maximum allowed active connections, list is used for checking aliveness
             # does not block additional client from doing calls that don't involve observation
             cv.Optional(CONF_MAX_CONNECTIONS, default=1): cv.int_range(min=1, max=5),
-            # Used to block types of subscriptions
-            # False - only NonConfirm Subscription requests are allowed
-            # True - only Confirm Subscription requests are allowed
+            # False - only NON observe requests allowed; ping config applies
+            # True  - only CON observe requests allowed; observe_retry applies
             cv.Optional(CONF_SUBSCRIPTION_CONFIRM, default=False): cv.boolean,
+            # Only valid when subscription_confirm is true (CON observe mode)
+            cv.Optional(CONF_OBSERVE_RETRY): cv.int_range(min=0, max=10),
             # Triggers
             cv.Optional(CONF_ON_CLIENT_CONNECTED): automation.validate_automation(
                 single=True
@@ -131,6 +183,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_OSCORE): OSCORE_SCHEMA,
         }
     ).extend(cv.COMPONENT_SCHEMA),
+    _validate_subscription_mode,
 )
 
 
@@ -172,6 +225,7 @@ async def to_code(config):
         )
     cg.add_define("USE_COAP_SERVER_PORT", config[CONF_PORT])
     cg.add(var.set_subscription_confirm(config[CONF_SUBSCRIPTION_CONFIRM]))
+    cg.add(var.set_observe_retry(config[CONF_OBSERVE_RETRY]))
 
     if oscore := config.get(CONF_OSCORE):
         cg.add_define("USE_COAP_OSCORE")

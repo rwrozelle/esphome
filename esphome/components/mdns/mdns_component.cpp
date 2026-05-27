@@ -212,7 +212,7 @@ void MDNSComponent::compile_records_(StaticVector<MDNSService, MDNS_SERVICE_COUN
 #endif
 
 #ifdef USE_COAP_SERVER
-  MDNS_STATIC_CONST_CHAR(SERVICE_COAP, "_coap");
+  MDNS_STATIC_CONST_CHAR(SERVICE_COAP, "_esphome-coap-server");
   MDNS_STATIC_CONST_CHAR(SERVICE_UDP, "_udp");
 
   auto &coap_service = services.emplace_next();
