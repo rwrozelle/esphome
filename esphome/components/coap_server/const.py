@@ -1,4 +1,5 @@
 CONF_OSCORE = "oscore"
+CONF_TRANSPORT = "transport"
 CONF_MASTER_SECRET = "master_secret"
 CONF_MASTER_SALT = "master_salt"
 CONF_SENDER_ID = "sender_id"

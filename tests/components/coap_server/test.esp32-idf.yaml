@@ -1,0 +1,8 @@
+<<: !include common.yaml
+
+network:
+  enable_ipv6: true
+
+wifi:
+  ssid: "test"
+  password: "testpassword"

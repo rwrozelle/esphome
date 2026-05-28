@@ -57,14 +57,9 @@ button:
 coap_server:
   id: coap_server_id
   port: 5683
-  server_ping_interval: 30s
-  server_ping_timeout_ratio: 2.0
-  server_ping_retry: 2
-  client_ping_interval: 120s
-  client_ping_timeout_ratio: 3.0
-  client_ping_retry: 3
   max_connections: 2
-  subscription_confirm: false
+  subscription_confirm: true
+  observe_retry: 3
   on_client_connected:
     then:
       - logger.log:
@@ -81,3 +76,10 @@ coap_server:
     master_salt: "9e7ca92223786340"
     sender_id: "01"
     recipient_id: "00"
+
+network:
+  enable_ipv6: true
+
+wifi:
+  ssid: "test"
+  password: "testpassword"

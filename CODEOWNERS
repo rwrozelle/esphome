@@ -113,6 +113,7 @@ esphome/components/chsc6x/* @kkosik20
 esphome/components/climate/* @esphome/core
 esphome/components/climate_ir/* @glmnet
 esphome/components/cm1106/* @andrewjswan
+esphome/components/coap_server/* @rwrozelle
 esphome/components/color_temperature/* @jesserockz
 esphome/components/combination/* @Cat-Ion @kahrendt
 esphome/components/const/* @esphome/core

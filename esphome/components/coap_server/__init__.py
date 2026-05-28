@@ -28,17 +28,18 @@ from .const import (
     CONF_SERVER_PING_RETRY,
     CONF_SERVER_PING_TIMEOUT_RATIO,
     CONF_SUBSCRIPTION_CONFIRM,
+    CONF_TRANSPORT,
 )
 
 DOMAIN = "coap_server"
 CODEOWNERS = ["@rwrozelle"]
-DEPENDENCIES = ["openthread"]
 
 coap_server_ns = cg.esphome_ns.namespace("coap_server")
 CoapServer = coap_server_ns.class_("CoapServer", cg.Component, cg.Controller)
+CoapServerOT = coap_server_ns.class_("CoapServerOT", CoapServer)
+CoapServerNet = coap_server_ns.class_("CoapServerNet", CoapServer)
 
 
-# Used for OSCORE
 def _hex_bytes(value):
     """Validate a hex string and normalise to lowercase with no separators."""
     value = cv.string(value)
@@ -52,7 +53,6 @@ def _hex_bytes(value):
     return clean.lower()
 
 
-# Used for OSCORE
 def _hex_bytes_nonempty(value):
     value = _hex_bytes(value)
     if len(value) == 0:
@@ -60,14 +60,12 @@ def _hex_bytes_nonempty(value):
     return value
 
 
-# Used for OSCORE
 def _hex_to_bytes_list(hex_str: str) -> list[int]:
     if not hex_str:
         return []
     return [int(hex_str[i : i + 2], 16) for i in range(0, len(hex_str), 2)]
 
 
-# Used for OSCORE
 def _validate_oscore(config):
     if config[CONF_SENDER_ID] == config[CONF_RECIPIENT_ID]:
         raise cv.Invalid(
@@ -141,11 +139,21 @@ def _validate_subscription_mode(config):
     return config
 
 
+def _validate_transport(config):
+    transport = config.get(CONF_TRANSPORT)
+    if transport == "openthread" and "openthread" not in CORE.loaded_integrations:
+        raise cv.Invalid(
+            f"'{CONF_TRANSPORT}: openthread' requires the openthread component to be configured"
+        )
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.only_on_esp32,
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(CoapServer),
+            cv.Optional(CONF_TRANSPORT): cv.one_of("openthread", "network", lower=True),
             cv.Optional(CONF_PORT, default=5683): cv.uint16_t,
             # Only valid when subscription_confirm is false (NON observe mode)
             cv.Optional(CONF_SERVER_PING_INTERVAL): cv.All(
@@ -184,12 +192,22 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_subscription_mode,
+    _validate_transport,
 )
 
 
 async def to_code(config):
+    transport = config.get(CONF_TRANSPORT)
+    use_ot = (
+        transport == "openthread"
+        if transport is not None
+        else "openthread" in CORE.loaded_integrations
+    )
 
-    var = cg.new_Pvariable(config[CONF_ID])
+    id_ = config[CONF_ID].copy()
+    id_.type = CoapServerOT if use_ot else CoapServerNet
+    var = cg.new_Pvariable(id_)
+
     await cg.register_component(var, config)
     cg.add_define("USE_COAP_SERVER")
     add_idf_component(
