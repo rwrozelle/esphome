@@ -141,45 +141,44 @@ static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_
   return CborNoError;
 }
 
-size_t CoapServer::cbor_output_(uint8_t *buffer, EntityBase *entity, EntityType type) {
+size_t CoapServer::cbor_output_(uint8_t *buffer, size_t buf_len, EntityBase *entity, EntityType type) {
   size_t encoded_len = 0;
   CborError err = CborNoError;
   // NOLINTBEGIN(bugprone-branch-clone)
   switch (type) {
 #ifdef USE_SENSOR
     case EntityType::ENTITYTYPE_SENSOR:
-      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, static_cast<sensor::Sensor *>(entity));
+      err = encode_entity(buffer, buf_len, &encoded_len, static_cast<sensor::Sensor *>(entity));
       break;
 #endif
 #ifdef USE_SWITCH
     case EntityType::ENTITYTYPE_SWITCH:
-      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, static_cast<switch_::Switch *>(entity));
+      err = encode_entity(buffer, buf_len, &encoded_len, static_cast<switch_::Switch *>(entity));
       break;
 #endif
 #ifdef USE_BINARY_SENSOR
     case EntityType::ENTITYTYPE_BINARY_SENSOR:
-      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len,
-                          static_cast<binary_sensor::BinarySensor *>(entity));
+      err = encode_entity(buffer, buf_len, &encoded_len, static_cast<binary_sensor::BinarySensor *>(entity));
       break;
 #endif
 #ifdef USE_TEXT_SENSOR
     case EntityType::ENTITYTYPE_TEXT_SENSOR:
-      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, static_cast<text_sensor::TextSensor *>(entity));
+      err = encode_entity(buffer, buf_len, &encoded_len, static_cast<text_sensor::TextSensor *>(entity));
       break;
 #endif
 #ifdef USE_NUMBER
     case EntityType::ENTITYTYPE_NUMBER:
-      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, static_cast<number::Number *>(entity));
+      err = encode_entity(buffer, buf_len, &encoded_len, static_cast<number::Number *>(entity));
       break;
 #endif
 #ifdef USE_LOCK
     case EntityType::ENTITYTYPE_LOCK:
-      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, static_cast<lock::Lock *>(entity));
+      err = encode_entity(buffer, buf_len, &encoded_len, static_cast<lock::Lock *>(entity));
       break;
 #endif
 #ifdef USE_VALVE
     case EntityType::ENTITYTYPE_VALVE:
-      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, static_cast<valve::Valve *>(entity));
+      err = encode_entity(buffer, buf_len, &encoded_len, static_cast<valve::Valve *>(entity));
       break;
 #endif
     case EntityType::ENTITYTYPE_BUTTON:
@@ -188,14 +187,14 @@ size_t CoapServer::cbor_output_(uint8_t *buffer, EntityBase *entity, EntityType 
       return 0;
     case EntityType::ENTITYTYPE_UNKNOWN:
     default:
-      err = encode_entity(buffer, COAP_PAYLOAD_MAX_SIZE, &encoded_len, entity);
+      err = encode_entity(buffer, buf_len, &encoded_len, entity);
       break;
   }
   // NOLINTEND(bugprone-branch-clone)
   if (err != CborNoError) {
     if (err == CborErrorOutOfMemory && entity != nullptr) {
       ESP_LOGE(TAG, "CBOR encode: state of '%s' exceeds %u-byte buffer — truncated to nothing",
-               entity->get_name().c_str(), (unsigned) COAP_PAYLOAD_MAX_SIZE);
+               entity->get_name().c_str(), (unsigned) buf_len);
     } else {
       ESP_LOGE(TAG, "CBOR encode error %d for entity '%s'", err, entity != nullptr ? entity->get_name().c_str() : "?");
     }

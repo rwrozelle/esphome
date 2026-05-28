@@ -21,99 +21,6 @@ namespace esphome::coap_server {
 
 static const char *const TAG = "coap_server";
 
-// ---------------------------------------------------------------------------
-// CoAP response builder
-// ---------------------------------------------------------------------------
-
-struct CoapBuilder {
-  uint8_t buf[1280];  // IPv6 minimum MTU; setup() rejects configs that would exceed this
-  size_t pos{0};
-  uint16_t last_opt{0};
-
-  void begin(uint8_t type, uint8_t code, uint16_t msg_id, const uint8_t *token, uint8_t token_len) {
-    buf[0] = (uint8_t) (0x40 | ((type & 3) << 4) | (token_len & 0x0F));
-    buf[1] = code;
-    buf[2] = (uint8_t) (msg_id >> 8);
-    buf[3] = (uint8_t) (msg_id & 0xFF);
-    pos = 4;
-    if (token_len > 0 && token != nullptr) {
-      memcpy(buf + 4, token, token_len);
-      pos += token_len;
-    }
-    last_opt = 0;
-  }
-
-  void option(uint16_t opt_num, const uint8_t *value, uint16_t value_len) {
-    uint16_t delta = opt_num - last_opt;
-    last_opt = opt_num;
-    uint8_t delta4;
-    uint8_t ext[2];
-    uint8_t ext_len = 0;
-    if (delta < 13) {
-      delta4 = (uint8_t) delta;
-    } else if (delta < 269) {
-      delta4 = 13;
-      ext[ext_len++] = (uint8_t) (delta - 13);
-    } else {
-      delta4 = 14;
-      uint16_t v = delta - 269;
-      ext[ext_len++] = (uint8_t) (v >> 8);
-      ext[ext_len++] = (uint8_t) v;
-    }
-    uint8_t len4;
-    uint8_t lext[2];
-    uint8_t lext_len = 0;
-    if (value_len < 13) {
-      len4 = (uint8_t) value_len;
-    } else if (value_len < 269) {
-      len4 = 13;
-      lext[lext_len++] = (uint8_t) (value_len - 13);
-    } else {
-      len4 = 14;
-      uint16_t v = value_len - 269;
-      lext[lext_len++] = (uint8_t) (v >> 8);
-      lext[lext_len++] = (uint8_t) v;
-    }
-    assert(pos + 1 + ext_len + lext_len + value_len <= sizeof(buf));
-    buf[pos++] = (uint8_t) ((delta4 << 4) | len4);
-    for (uint8_t i = 0; i < ext_len; i++)
-      buf[pos++] = ext[i];
-    for (uint8_t i = 0; i < lext_len; i++)
-      buf[pos++] = lext[i];
-    if (value_len > 0 && value != nullptr) {
-      memcpy(buf + pos, value, value_len);
-      pos += value_len;
-    }
-  }
-
-  void option_uint(uint16_t opt_num, uint32_t value) {
-    uint8_t v[4];
-    uint8_t vlen = 0;
-    if (value > 0xFFFFFF)
-      v[vlen++] = (uint8_t) (value >> 24);
-    if (value > 0xFFFF)
-      v[vlen++] = (uint8_t) (value >> 16);
-    if (value > 0xFF)
-      v[vlen++] = (uint8_t) (value >> 8);
-    if (value > 0)
-      v[vlen++] = (uint8_t) value;
-    option(opt_num, v, vlen);
-  }
-
-  void option_empty(uint16_t opt_num) { option(opt_num, nullptr, 0); }
-
-  void payload_marker() {
-    assert(pos + 1 <= sizeof(buf));
-    buf[pos++] = 0xFF;
-  }
-
-  void append(const uint8_t *data, size_t len) {
-    assert(pos + len <= sizeof(buf));
-    memcpy(buf + pos, data, len);
-    pos += len;
-  }
-};
-
 // Response type: CON(0)→ACK(2), NON(1)→NON(1)
 static inline uint8_t resp_type(uint8_t req_type) { return (req_type == 0) ? 2 : 1; }
 
@@ -238,12 +145,12 @@ void CoapServerNet::setup() {
 void CoapServerNet::loop() {
   if (this->sock_ < 0)
     return;
-  uint8_t buf[1280];
   sockaddr_in6 peer{};
   socklen_t peer_len = sizeof(peer);
   ssize_t n;
-  while ((n = recvfrom(this->sock_, buf, sizeof(buf), 0, (struct sockaddr *) &peer, &peer_len)) > 0)
-    this->process_datagram_(buf, (size_t) n, &peer);
+  while ((n = recvfrom(this->sock_, this->recv_buf_, sizeof(this->recv_buf_), 0, (struct sockaddr *) &peer,
+                       &peer_len)) > 0)
+    this->process_datagram_(this->recv_buf_, (size_t) n, &peer);
 }
 
 bool CoapServerNet::teardown() {
@@ -427,9 +334,8 @@ void CoapServerNet::process_datagram_(const uint8_t *buf, size_t len, const sock
 
   NetCoapResource *res = find_resource_(pkt.uri_path);
   if (res == nullptr) {
-    CoapBuilder b;
-    b.begin(resp_type(pkt.type), 0x84, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(b.buf, b.pos, peer);
+    this->builder_.begin(resp_type(pkt.type), 0x84, pkt.message_id, pkt.token, pkt.token_len);
+    send_response(this->builder_.buf, this->builder_.pos, peer);
     return;
   }
 
@@ -465,13 +371,12 @@ void CoapServerNet::send_response(const uint8_t *buf, size_t len, const sockaddr
 void CoapServerNet::handle_well_known_core_(const CoapPacket &pkt, const sockaddr_in6 &peer) {
   if (pkt.code != 0x01)
     return;
-  CoapBuilder b;
-  b.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
+  this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
   uint8_t cf = 40;  // link-format
-  b.option(12, &cf, 1);
-  b.payload_marker();
-  b.append(this->link_format_buf_.get(), this->link_format_size_);
-  send_response(b.buf, b.pos, &peer);
+  this->builder_.option(12, &cf, 1);
+  this->builder_.payload_marker();
+  this->builder_.append(this->link_format_buf_.get(), this->link_format_size_);
+  send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 
 // ---------------------------------------------------------------------------
@@ -484,18 +389,16 @@ void CoapServerNet::handle_info_request_(const CoapPacket &pkt, const sockaddr_i
   uint8_t payload[512];
   size_t payload_len = encode_device_info(payload, sizeof(payload), this);
   if (payload_len == 0) {
-    CoapBuilder b;
-    b.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(b.buf, b.pos, &peer);
+    this->builder_.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
+    send_response(this->builder_.buf, this->builder_.pos, &peer);
     return;
   }
-  CoapBuilder b;
-  b.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
+  this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
   uint8_t cf = 60;  // cbor
-  b.option(12, &cf, 1);
-  b.payload_marker();
-  b.append(payload, payload_len);
-  send_response(b.buf, b.pos, &peer);
+  this->builder_.option(12, &cf, 1);
+  this->builder_.payload_marker();
+  this->builder_.append(payload, payload_len);
+  send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 
 // ---------------------------------------------------------------------------
@@ -522,13 +425,12 @@ void CoapServerNet::handle_ping_request_(const CoapPacket &pkt, const sockaddr_i
   uint8_t payload_buf[16];
   size_t plen = this->build_ping_payload(payload_buf, boot_signal);
 
-  CoapBuilder b;
-  b.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
+  this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
   uint8_t cf = 60;
-  b.option(12, &cf, 1);
-  b.payload_marker();
-  b.append(payload_buf, plen);
-  send_response(b.buf, b.pos, &peer);
+  this->builder_.option(12, &cf, 1);
+  this->builder_.payload_marker();
+  this->builder_.append(payload_buf, plen);
+  send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 
 // ---------------------------------------------------------------------------
@@ -539,25 +441,23 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
   touch_client_(peer);
 
 #ifdef USE_COAP_OSCORE
-  uint8_t oscore_plain[256];
   size_t oscore_plain_len = 0;
   OscoreRequestInfo oscore_req_info{};
-  if (!this->oscore_unprotect_request_(pkt, resource, oscore_plain, sizeof(oscore_plain), &oscore_plain_len,
-                                       &oscore_req_info)) {
-    CoapBuilder b;
-    b.begin(resp_type(pkt.type), 0x81, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(b.buf, b.pos, &peer);
+  if (!this->oscore_unprotect_request_(pkt, resource, this->oscore_plain_, sizeof(this->oscore_plain_),
+                                       &oscore_plain_len, &oscore_req_info)) {
+    this->builder_.begin(resp_type(pkt.type), 0x81, pkt.message_id, pkt.token, pkt.token_len);
+    send_response(this->builder_.buf, this->builder_.pos, &peer);
     return;
   }
   const bool oscore_protected = (oscore_plain_len > 0);
-  uint8_t effective_code = oscore_protected ? oscore_plain[0] : pkt.code;
+  uint8_t effective_code = oscore_protected ? this->oscore_plain_[0] : pkt.code;
   const uint8_t *payload_ptr = pkt.payload;
   uint16_t payload_len = pkt.payload_len;
   if (oscore_protected) {
     // extract payload from inner plaintext: skip code + options
     uint8_t inner_pos = 1;
     while (inner_pos < oscore_plain_len) {
-      uint8_t dl = oscore_plain[inner_pos++];
+      uint8_t dl = this->oscore_plain_[inner_pos++];
       if (dl == 0xFF)
         break;
       uint8_t od = (dl >> 4) & 0x0F;
@@ -573,7 +473,7 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
       else
         inner_pos += ol;
     }
-    payload_ptr = oscore_plain + inner_pos;
+    payload_ptr = this->oscore_plain_ + inner_pos;
     payload_len = (uint16_t) (oscore_plain_len - inner_pos);
   }
 #else
@@ -582,7 +482,6 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
   uint16_t payload_len = pkt.payload_len;
 #endif
 
-  uint8_t cbor_buf[COAP_PAYLOAD_MAX_SIZE];
   size_t cbor_len = 0;
 
   if (effective_code == 0x01) {  // GET
@@ -591,9 +490,8 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
       if (pkt.observe == 0) {
         bool is_con = (pkt.type == 0);
         if (this->get_subscription_confirm() != is_con) {
-          CoapBuilder b;
-          b.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
-          send_response(b.buf, b.pos, &peer);
+          this->builder_.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
+          send_response(this->builder_.buf, this->builder_.pos, &peer);
           return;
         }
         // Deregister stale observer from same client
@@ -618,92 +516,81 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
       }
     }
 
-    cbor_len = cbor_output_(cbor_buf, resource->entity, resource->type);
+    cbor_len = cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), resource->entity, resource->type);
     if (cbor_len == 0) {
-      CoapBuilder b;
-      b.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
-      send_response(b.buf, b.pos, &peer);
+      this->builder_.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
+      send_response(this->builder_.buf, this->builder_.pos, &peer);
       return;
     }
 
 #ifdef USE_COAP_OSCORE
     if (oscore_protected) {
-      uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
-      size_t inner_len = oscore_build_inner_cbor(0x45, cbor_buf, cbor_len, inner);
-      uint8_t cipher[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
-      size_t cipher_len = oscore_protect_response_(inner, inner_len, oscore_req_info, false, cipher, sizeof(cipher));
+      size_t inner_len = oscore_build_inner_cbor(0x45, this->cbor_buf_, cbor_len, this->oscore_inner_);
+      size_t cipher_len = oscore_protect_response_(this->oscore_inner_, inner_len, oscore_req_info, false,
+                                                   this->oscore_cipher_, sizeof(this->oscore_cipher_));
       if (cipher_len == 0) {
-        CoapBuilder b;
-        b.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
-        send_response(b.buf, b.pos, &peer);
+        this->builder_.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
+        send_response(this->builder_.buf, this->builder_.pos, &peer);
         return;
       }
-      CoapBuilder b;
-      b.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
+      this->builder_.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
       if (resource->observable && observer != nullptr && pkt.observe == 0)
-        b.option_uint(6, observer->observe_serial++);
-      b.option_empty(9);  // OSCORE option empty
-      b.payload_marker();
-      b.append(cipher, cipher_len);
-      send_response(b.buf, b.pos, &peer);
+        this->builder_.option_uint(6, observer->observe_serial++);
+      this->builder_.option_empty(9);  // OSCORE option empty
+      this->builder_.payload_marker();
+      this->builder_.append(this->oscore_cipher_, cipher_len);
+      send_response(this->builder_.buf, this->builder_.pos, &peer);
       return;
     }
 #endif
-    CoapBuilder b;
-    b.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
+    this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
     if (resource->observable && observer != nullptr && pkt.observe_present && pkt.observe == 0)
-      b.option_uint(6, observer->observe_serial++);
+      this->builder_.option_uint(6, observer->observe_serial++);
     uint8_t cf = 60;
-    b.option(12, &cf, 1);
-    b.payload_marker();
-    b.append(cbor_buf, cbor_len);
-    send_response(b.buf, b.pos, &peer);
+    this->builder_.option(12, &cf, 1);
+    this->builder_.payload_marker();
+    this->builder_.append(this->cbor_buf_, cbor_len);
+    send_response(this->builder_.buf, this->builder_.pos, &peer);
 
   } else if (effective_code == 0x02 &&  // POST
              (resource->type == ENTITYTYPE_SWITCH || resource->type == ENTITYTYPE_NUMBER ||
               resource->type == ENTITYTYPE_LOCK || resource->type == ENTITYTYPE_VALVE)) {
     apply_entity_post(resource->entity, resource->type, resource->action, payload_ptr, payload_len);
 
-    cbor_len = cbor_output_(cbor_buf, resource->entity, resource->type);
+    cbor_len = cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), resource->entity, resource->type);
     if (cbor_len == 0) {
-      CoapBuilder b;
-      b.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
-      send_response(b.buf, b.pos, &peer);
+      this->builder_.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
+      send_response(this->builder_.buf, this->builder_.pos, &peer);
       return;
     }
 #ifdef USE_COAP_OSCORE
     if (oscore_protected) {
-      uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
-      size_t inner_len = oscore_build_inner_cbor(0x44, cbor_buf, cbor_len, inner);
-      uint8_t cipher[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
-      size_t cipher_len = oscore_protect_response_(inner, inner_len, oscore_req_info, false, cipher, sizeof(cipher));
+      size_t inner_len = oscore_build_inner_cbor(0x44, this->cbor_buf_, cbor_len, this->oscore_inner_);
+      size_t cipher_len = oscore_protect_response_(this->oscore_inner_, inner_len, oscore_req_info, false,
+                                                   this->oscore_cipher_, sizeof(this->oscore_cipher_));
       if (cipher_len == 0) {
-        CoapBuilder b;
-        b.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
-        send_response(b.buf, b.pos, &peer);
+        this->builder_.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
+        send_response(this->builder_.buf, this->builder_.pos, &peer);
         return;
       }
-      CoapBuilder b;
-      b.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
-      b.option_empty(9);
-      b.payload_marker();
-      b.append(cipher, cipher_len);
-      send_response(b.buf, b.pos, &peer);
+      this->builder_.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
+      this->builder_.option_empty(9);
+      this->builder_.payload_marker();
+      this->builder_.append(this->oscore_cipher_, cipher_len);
+      send_response(this->builder_.buf, this->builder_.pos, &peer);
       return;
     }
 #endif
-    CoapBuilder b;
-    b.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
+    this->builder_.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
     uint8_t cf = 60;
-    b.option(12, &cf, 1);
-    b.payload_marker();
-    b.append(cbor_buf, cbor_len);
-    send_response(b.buf, b.pos, &peer);
+    this->builder_.option(12, &cf, 1);
+    this->builder_.payload_marker();
+    this->builder_.append(this->cbor_buf_, cbor_len);
+    send_response(this->builder_.buf, this->builder_.pos, &peer);
 
   } else {
-    CoapBuilder b;
-    b.begin(resp_type(pkt.type), 0x85, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(b.buf, b.pos, &peer);
+    this->builder_.begin(resp_type(pkt.type), 0x85, pkt.message_id, pkt.token, pkt.token_len);
+    send_response(this->builder_.buf, this->builder_.pos, &peer);
   }
 }
 
@@ -715,20 +602,17 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
 void CoapServerNet::handle_button_request_(const CoapPacket &pkt, const sockaddr_in6 &peer, NetCoapResource *resource) {
   touch_client_(peer);
   if (pkt.code != 0x02) {  // POST
-    CoapBuilder b;
-    b.begin(resp_type(pkt.type), 0x85, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(b.buf, b.pos, &peer);
+    this->builder_.begin(resp_type(pkt.type), 0x85, pkt.message_id, pkt.token, pkt.token_len);
+    send_response(this->builder_.buf, this->builder_.pos, &peer);
     return;
   }
 #ifdef USE_COAP_OSCORE
-  uint8_t oscore_plain[64];
   size_t oscore_plain_len = 0;
   OscoreRequestInfo oscore_req_info{};
-  if (!oscore_unprotect_request_(pkt, resource, oscore_plain, sizeof(oscore_plain), &oscore_plain_len,
+  if (!oscore_unprotect_request_(pkt, resource, this->oscore_plain_, sizeof(this->oscore_plain_), &oscore_plain_len,
                                  &oscore_req_info)) {
-    CoapBuilder b;
-    b.begin(resp_type(pkt.type), 0x81, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(b.buf, b.pos, &peer);
+    this->builder_.begin(resp_type(pkt.type), 0x81, pkt.message_id, pkt.token, pkt.token_len);
+    send_response(this->builder_.buf, this->builder_.pos, &peer);
     return;
   }
 #endif
@@ -739,19 +623,17 @@ void CoapServerNet::handle_button_request_(const CoapPacket &pkt, const sockaddr
     uint8_t cipher[OSCORE_TAG_LEN + 4];
     size_t cipher_len = oscore_protect_response_(inner, 1, oscore_req_info, false, cipher, sizeof(cipher));
     if (cipher_len > 0) {
-      CoapBuilder b;
-      b.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
-      b.option_empty(9);
-      b.payload_marker();
-      b.append(cipher, cipher_len);
-      send_response(b.buf, b.pos, &peer);
+      this->builder_.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
+      this->builder_.option_empty(9);
+      this->builder_.payload_marker();
+      this->builder_.append(cipher, cipher_len);
+      send_response(this->builder_.buf, this->builder_.pos, &peer);
     }
     return;
   }
 #endif
-  CoapBuilder b;
-  b.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
-  send_response(b.buf, b.pos, &peer);
+  this->builder_.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
+  send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 #endif
 
@@ -790,11 +672,10 @@ void CoapServerNet::on_entity_update(EntityBase *entity) {
   }
   if (resource == nullptr)
     return;
-  uint8_t payload_buf[COAP_PAYLOAD_MAX_SIZE];
-  size_t payload_len = cbor_output_(payload_buf, resource->entity, resource->type);
+  size_t payload_len = cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), resource->entity, resource->type);
   if (payload_len == 0)
     return;
-  notify_observers_(resource, payload_buf, payload_len);
+  notify_observers_(resource, this->cbor_buf_, payload_len);
 }
 
 void CoapServerNet::notify_observers_(NetCoapResource *resource, const uint8_t *payload, size_t payload_len) {
@@ -809,28 +690,26 @@ void CoapServerNet::notify_observers_(NetCoapResource *resource, const uint8_t *
       obs->notify_count = (obs->notify_count == 5) ? 1 : (obs->notify_count + 1);
 
 #ifdef USE_COAP_OSCORE
-    uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
-    size_t inner_len = oscore_build_inner_cbor(0x45, payload, payload_len, inner);
+    size_t inner_len = oscore_build_inner_cbor(0x45, payload, payload_len, this->oscore_inner_);
     OscoreRequestInfo aad_info{};
     memcpy(aad_info.piv, obs->oscore_req_piv, obs->oscore_req_piv_len);
     aad_info.piv_len = obs->oscore_req_piv_len;
     memcpy(aad_info.kid, obs->oscore_req_kid, obs->oscore_req_kid_len);
     aad_info.kid_len = obs->oscore_req_kid_len;
-    uint8_t cipher[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
-    size_t cipher_len = oscore_protect_response_(inner, inner_len, aad_info, true, cipher, sizeof(cipher));
+    size_t cipher_len = oscore_protect_response_(this->oscore_inner_, inner_len, aad_info, true, this->oscore_cipher_,
+                                                 sizeof(this->oscore_cipher_));
 
     uint8_t oscore_opt[16];
     uint8_t opt_pos = this->oscore_build_notify_option_(oscore_opt);
 
     if (cipher_len > 0) {
       uint16_t msg_id = this->next_msg_id_++;
-      CoapBuilder b;
-      b.begin(send_con ? 0 : 1, 0x45, msg_id, obs->token, obs->token_len);
-      b.option_uint(6, obs->observe_serial++);
-      b.option(9, oscore_opt, opt_pos);
-      b.payload_marker();
-      b.append(cipher, cipher_len);
-      send_response(b.buf, b.pos, &obs->peer_addr);
+      this->builder_.begin(send_con ? 0 : 1, 0x45, msg_id, obs->token, obs->token_len);
+      this->builder_.option_uint(6, obs->observe_serial++);
+      this->builder_.option(9, oscore_opt, opt_pos);
+      this->builder_.payload_marker();
+      this->builder_.append(this->oscore_cipher_, cipher_len);
+      send_response(this->builder_.buf, this->builder_.pos, &obs->peer_addr);
       if (send_con) {
         obs->con_msg_id = msg_id;
         obs->con_pending = true;
@@ -838,14 +717,13 @@ void CoapServerNet::notify_observers_(NetCoapResource *resource, const uint8_t *
     }
 #else
     uint16_t msg_id = this->next_msg_id_++;
-    CoapBuilder b;
-    b.begin(send_con ? 0 : 1, 0x45, msg_id, obs->token, obs->token_len);
-    b.option_uint(6, obs->observe_serial++);
+    this->builder_.begin(send_con ? 0 : 1, 0x45, msg_id, obs->token, obs->token_len);
+    this->builder_.option_uint(6, obs->observe_serial++);
     uint8_t cf = 60;
-    b.option(12, &cf, 1);
-    b.payload_marker();
-    b.append(payload, payload_len);
-    send_response(b.buf, b.pos, &obs->peer_addr);
+    this->builder_.option(12, &cf, 1);
+    this->builder_.payload_marker();
+    this->builder_.append(payload, payload_len);
+    send_response(this->builder_.buf, this->builder_.pos, &obs->peer_addr);
     if (send_con) {
       obs->con_msg_id = msg_id;
       obs->con_pending = true;
@@ -1016,11 +894,10 @@ void CoapServerNet::ping_client_(NetCoapClient *client) {
     }
     if (client->has_non_observer && (now - client->last_response_ms >= this->client_ping_interval_ms_)) {
       // Send a GET /ping to the client to check liveness
-      CoapBuilder b;
-      b.begin(1, 0x01, this->next_msg_id_++, nullptr, 0);  // NON GET
-      b.option(11, (const uint8_t *) "ping", 4);
+      this->builder_.begin(1, 0x01, this->next_msg_id_++, nullptr, 0);  // NON GET
+      this->builder_.option(11, (const uint8_t *) "ping", 4);
       client->last_ping_sent_ms = now;
-      send_response(b.buf, b.pos, &client->peer_addr);
+      send_response(this->builder_.buf, this->builder_.pos, &client->peer_addr);
     }
     ping_client_(client);
   });
@@ -1146,9 +1023,8 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_i
   if (pkt.observe_present && pkt.observe == 0) {
     bool is_con = (pkt.type == 0);
     if (this->get_subscription_confirm() != is_con) {
-      CoapBuilder b;
-      b.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
-      send_response(b.buf, b.pos, &peer);
+      this->builder_.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
+      send_response(this->builder_.buf, this->builder_.pos, &peer);
       return;
     }
     NetCoapObserver *stale = get_observer_(pkt.token, pkt.token_len, peer);
@@ -1161,15 +1037,14 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_i
       free_observer_(obs);
   }
   static const uint8_t kEmpty[] = {0x80};
-  CoapBuilder b;
-  b.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
+  this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
   if (pkt.observe_present && pkt.observe == 0)
-    b.option_uint(6, 0);
+    this->builder_.option_uint(6, 0);
   uint8_t cf = 60;
-  b.option(12, &cf, 1);
-  b.payload_marker();
-  b.append(kEmpty, sizeof(kEmpty));
-  send_response(b.buf, b.pos, &peer);
+  this->builder_.option(12, &cf, 1);
+  this->builder_.payload_marker();
+  this->builder_.append(kEmpty, sizeof(kEmpty));
+  send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 #endif
 

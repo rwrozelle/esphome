@@ -399,7 +399,7 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
       }
     }
     ehCoapResource *cbor_res = (observer != nullptr) ? observer->resource : resource;
-    payload_len = cbor_output_(payload_buffer, cbor_res->entity, cbor_res->type);
+    payload_len = cbor_output_(payload_buffer, COAP_PAYLOAD_MAX_SIZE, cbor_res->entity, cbor_res->type);
     if (payload_len == 0) {
       ESP_LOGW(TAG, "cbor_output_ returned 0 for path=%s type=%d", resource->mUriPath, (int) resource->type);
       SuccessOrExit(
@@ -464,7 +464,7 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
 #endif
       apply_entity_post(resource->entity, type, resource->action, msg_buf, msg_len);
     }
-    payload_len = cbor_output_(payload_buffer, resource->entity, resource->type);
+    payload_len = cbor_output_(payload_buffer, COAP_PAYLOAD_MAX_SIZE, resource->entity, resource->type);
 
     if (payload_len == 0) {
       SuccessOrExit(
@@ -1154,7 +1154,7 @@ void CoapServerOT::on_entity_update(EntityBase *entity) {
   if (resource == nullptr)
     return;
   uint8_t payload_buffer[COAP_PAYLOAD_MAX_SIZE];
-  size_t payload_len = cbor_output_(payload_buffer, resource->entity, resource->type);
+  size_t payload_len = cbor_output_(payload_buffer, COAP_PAYLOAD_MAX_SIZE, resource->entity, resource->type);
   if (payload_len == 0) {
     ESP_LOGW(TAG, "cbor encode failed, skip notifications");
     return;

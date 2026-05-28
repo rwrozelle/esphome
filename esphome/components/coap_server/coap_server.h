@@ -6,6 +6,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/util.h"
 #include <array>
+#include <cassert>
 #include <memory>
 
 #if defined(USE_LOGGER) || defined(USE_OPENTHREAD)
@@ -30,6 +31,14 @@ namespace esphome::coap_server {
 class CoapServer;
 
 static constexpr size_t COAP_PAYLOAD_MAX_SIZE = 256;
+static constexpr size_t COAP_PAYLOAD_SMALL_SIZE = 64;
+// CBOR buffer sized for the largest entity type actually in the build.
+// text_sensor values can fill the full 256 bytes; all other entity types fit in 64.
+#ifdef USE_TEXT_SENSOR
+static constexpr size_t COAP_CBOR_BUF_SIZE = COAP_PAYLOAD_MAX_SIZE;
+#else
+static constexpr size_t COAP_CBOR_BUF_SIZE = COAP_PAYLOAD_SMALL_SIZE;
+#endif
 
 enum EntityType : uint8_t {
   ENTITYTYPE_UNKNOWN = 0,
@@ -195,7 +204,7 @@ class CoapServer : public Component, public Controller {
   // Pure virtual — each transport subclass implements entity-state notification
   virtual void on_entity_update(EntityBase *entity) = 0;
 
-  size_t cbor_output_(uint8_t *buffer, EntityBase *entity, EntityType type);
+  size_t cbor_output_(uint8_t *buffer, size_t buf_len, EntityBase *entity, EntityType type);
   static size_t encode_device_info(uint8_t *buf, size_t buf_len, CoapServer *server);
   // Parses a CBOR POST payload and executes the entity command (switch/number/lock/valve).
   // Used by both OT and Net transports to avoid duplicating the dispatch logic.
@@ -409,6 +418,97 @@ struct NetCoapObserver : CoapObserverBase {
   uint16_t con_msg_id{0};  // msg_id of the last CON notification sent
 };
 
+// CoAP response builder — fits an IPv6 minimum-MTU datagram (1280 bytes).
+// Kept as a class member of CoapServerNet to avoid a 1280-byte stack allocation per handler call.
+struct CoapBuilder {
+  uint8_t buf[1280];
+  size_t pos{0};
+  uint16_t last_opt{0};
+
+  void begin(uint8_t type, uint8_t code, uint16_t msg_id, const uint8_t *token, uint8_t token_len) {
+    buf[0] = (uint8_t) (0x40 | ((type & 3) << 4) | (token_len & 0x0F));
+    buf[1] = code;
+    buf[2] = (uint8_t) (msg_id >> 8);
+    buf[3] = (uint8_t) (msg_id & 0xFF);
+    pos = 4;
+    if (token_len > 0 && token != nullptr) {
+      memcpy(buf + 4, token, token_len);
+      pos += token_len;
+    }
+    last_opt = 0;
+  }
+
+  void option(uint16_t opt_num, const uint8_t *value, uint16_t value_len) {
+    uint16_t delta = opt_num - last_opt;
+    last_opt = opt_num;
+    uint8_t delta4;
+    uint8_t ext[2];
+    uint8_t ext_len = 0;
+    if (delta < 13) {
+      delta4 = (uint8_t) delta;
+    } else if (delta < 269) {
+      delta4 = 13;
+      ext[ext_len++] = (uint8_t) (delta - 13);
+    } else {
+      delta4 = 14;
+      uint16_t v = delta - 269;
+      ext[ext_len++] = (uint8_t) (v >> 8);
+      ext[ext_len++] = (uint8_t) v;
+    }
+    uint8_t len4;
+    uint8_t lext[2];
+    uint8_t lext_len = 0;
+    if (value_len < 13) {
+      len4 = (uint8_t) value_len;
+    } else if (value_len < 269) {
+      len4 = 13;
+      lext[lext_len++] = (uint8_t) (value_len - 13);
+    } else {
+      len4 = 14;
+      uint16_t v = value_len - 269;
+      lext[lext_len++] = (uint8_t) (v >> 8);
+      lext[lext_len++] = (uint8_t) v;
+    }
+    assert(pos + 1 + ext_len + lext_len + value_len <= sizeof(buf));
+    buf[pos++] = (uint8_t) ((delta4 << 4) | len4);
+    for (uint8_t i = 0; i < ext_len; i++)
+      buf[pos++] = ext[i];
+    for (uint8_t i = 0; i < lext_len; i++)
+      buf[pos++] = lext[i];
+    if (value_len > 0 && value != nullptr) {
+      memcpy(buf + pos, value, value_len);
+      pos += value_len;
+    }
+  }
+
+  void option_uint(uint16_t opt_num, uint32_t value) {
+    uint8_t v[4];
+    uint8_t vlen = 0;
+    if (value > 0xFFFFFF)
+      v[vlen++] = (uint8_t) (value >> 24);
+    if (value > 0xFFFF)
+      v[vlen++] = (uint8_t) (value >> 16);
+    if (value > 0xFF)
+      v[vlen++] = (uint8_t) (value >> 8);
+    if (value > 0)
+      v[vlen++] = (uint8_t) value;
+    option(opt_num, v, vlen);
+  }
+
+  void option_empty(uint16_t opt_num) { option(opt_num, nullptr, 0); }
+
+  void payload_marker() {
+    assert(pos + 1 <= sizeof(buf));
+    buf[pos++] = 0xFF;
+  }
+
+  void append(const uint8_t *data, size_t len) {
+    assert(pos + len <= sizeof(buf));
+    memcpy(buf + pos, data, len);
+    pos += len;
+  }
+};
+
 class CoapServerNet : public CoapServer {
  public:
   struct CoapPacket {
@@ -482,6 +582,21 @@ class CoapServerNet : public CoapServer {
   std::array<NetCoapClient, USE_COAP_SERVER_MAX_CLIENTS> active_clients_{};
   NetCoapObserver *active_observers_{nullptr};
   NetCoapObserver *free_observers_{nullptr};
+
+  // Moved off the stack to avoid loopTask overflow.
+  // recv_buf_: recvfrom staging buffer (1280 B = IPv6 min MTU).
+  // builder_: reusable response builder; ESPHome main loop is single-threaded so one instance suffices.
+  // cbor_buf_: CBOR output staging; sized to COAP_CBOR_BUF_SIZE (64 B without text_sensor, 256 B with).
+  uint8_t recv_buf_[1280]{};
+  CoapBuilder builder_{};
+  uint8_t cbor_buf_[COAP_CBOR_BUF_SIZE]{};
+#ifdef USE_COAP_OSCORE
+  // oscore_plain_: decrypted inner CoAP bytes for inbound requests (64 B covers all POST payloads).
+  // oscore_inner_/cipher_: staging buffers for outbound OSCORE encryption.
+  uint8_t oscore_plain_[COAP_PAYLOAD_SMALL_SIZE]{};
+  uint8_t oscore_inner_[COAP_CBOR_BUF_SIZE + 8]{};
+  uint8_t oscore_cipher_[COAP_CBOR_BUF_SIZE + 16]{};  // +8 inner overhead + 8 auth tag
+#endif
 };
 #endif  // NOT USE_OPENTHREAD
 
