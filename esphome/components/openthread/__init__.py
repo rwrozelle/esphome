@@ -64,7 +64,7 @@ COMPONENT_DIR = Path(__file__).resolve().parent
 
 
 def _get_config_header_name() -> str:
-    sanitized = re.sub(r"[^a-zA-Z0-9]", "_", CORE.name)
+    sanitized = re.sub(r"[^a-zA-Z0-9]", "_", CORE.config_path.stem)
     return f"openthread_additional_config_{sanitized}.h"
 
 
