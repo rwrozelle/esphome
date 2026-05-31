@@ -1,6 +1,5 @@
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components.esp32 import add_idf_component
 from esphome.components.openthread.const import CONF_DEVICE_TYPE, CONF_POLL_PERIOD
 import esphome.config_validation as cv
 from esphome.const import (
@@ -156,7 +155,6 @@ def _validate_transport(config):
 
 
 CONFIG_SCHEMA = cv.All(
-    cv.only_on_esp32,
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(CoapServer),
@@ -217,13 +215,6 @@ async def to_code(config):
 
     await cg.register_component(var, config)
     cg.add_define("USE_COAP_SERVER")
-    add_idf_component(
-        name="cbor",
-        repo="https://github.com/rwrozelle/idf-extra-components",
-        ref="cbor7",
-        path="cbor",
-    )
-
     # Track controller registration for StaticVector sizing
     CORE.register_controller()
 

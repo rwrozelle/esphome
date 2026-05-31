@@ -1,7 +1,7 @@
 #include "coap_server.h"
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
-#include "cbor.h"  // NOLINT(build/include_subdir)
+#include "cbor.h"
 
 #ifndef CBOR_CHECK
 #define CBOR_CHECK(expr) \
