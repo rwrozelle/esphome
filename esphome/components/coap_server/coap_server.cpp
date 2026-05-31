@@ -890,6 +890,24 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
         put("\"", 1);
       }
     }
+#ifdef USE_NUMBER
+    if (res.type == ENTITYTYPE_NUMBER) {
+      const auto *num = static_cast<const number::Number *>(res.entity);
+      char val_buf[24];
+      if (!std::isnan(num->traits.get_min_value())) {
+        size_t n = (size_t) snprintf(val_buf, sizeof(val_buf), ";min=%g", num->traits.get_min_value());
+        put(val_buf, n);
+      }
+      if (!std::isnan(num->traits.get_max_value())) {
+        size_t n = (size_t) snprintf(val_buf, sizeof(val_buf), ";max=%g", num->traits.get_max_value());
+        put(val_buf, n);
+      }
+      if (!std::isnan(num->traits.get_step())) {
+        size_t n = (size_t) snprintf(val_buf, sizeof(val_buf), ";step=%g", num->traits.get_step());
+        put(val_buf, n);
+      }
+    }
+#endif
   }
   return static_cast<uint16_t>(p - buf);
 }

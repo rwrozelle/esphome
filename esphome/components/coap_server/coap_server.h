@@ -577,7 +577,7 @@ class CoapServerNet : public CoapServer {
 #endif
 
   int sock_{-1};
-  uint16_t next_msg_id_{1};
+  uint16_t next_msg_id_{static_cast<uint16_t>(random_uint32())};
   FixedVector<NetCoapResource> resources_;
   std::array<NetCoapClient, USE_COAP_SERVER_MAX_CLIENTS> active_clients_{};
   NetCoapObserver *active_observers_{nullptr};

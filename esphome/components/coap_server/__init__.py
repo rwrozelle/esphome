@@ -60,6 +60,13 @@ def _hex_bytes_nonempty(value):
     return value
 
 
+def _hex_bytes_master_secret(value):
+    value = _hex_bytes_nonempty(value)
+    if len(value) < 32:
+        raise cv.Invalid("master_secret must be at least 16 bytes (32 hex characters)")
+    return value
+
+
 def _hex_to_bytes_list(hex_str: str) -> list[int]:
     if not hex_str:
         return []
@@ -78,7 +85,7 @@ def _validate_oscore(config):
 OSCORE_SCHEMA = cv.All(
     cv.Schema(
         {
-            cv.Required(CONF_MASTER_SECRET): _hex_bytes_nonempty,
+            cv.Required(CONF_MASTER_SECRET): _hex_bytes_master_secret,
             cv.Optional(CONF_MASTER_SALT, default=""): _hex_bytes,
             cv.Required(CONF_SENDER_ID): _hex_bytes_nonempty,
             cv.Required(CONF_RECIPIENT_ID): _hex_bytes_nonempty,

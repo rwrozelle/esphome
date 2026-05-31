@@ -319,6 +319,11 @@ void CoapServerNet::process_datagram_(const uint8_t *buf, size_t len, const sock
     return;
   }
 
+  if (pkt.type == 1 && (pkt.code & 0xE0) == 0x40) {  // NON 2.xx — response to server-initiated GET /ping
+    touch_client_(*peer);
+    return;
+  }
+
   if (strcmp(pkt.uri_path, ".well-known/core") == 0) {
     handle_well_known_core_(pkt, *peer);
     return;
