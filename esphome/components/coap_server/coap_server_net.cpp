@@ -841,7 +841,7 @@ NetCoapClient *CoapServerNet::new_client_(const sockaddr_in6 &peer) {
 
 NetCoapClient *CoapServerNet::find_client_(const sockaddr_in6 &peer) {
   for (auto &c : this->active_clients_)
-    if (c.active && addr_equal(c.peer_addr, peer))
+    if (c.active && memcmp(&c.peer_addr.sin6_addr, &peer.sin6_addr, sizeof(peer.sin6_addr)) == 0)
       return &c;
   return nullptr;
 }
