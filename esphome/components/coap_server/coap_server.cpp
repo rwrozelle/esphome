@@ -214,26 +214,29 @@ size_t CoapServer::build_link_format(uint8_t *buf, size_t buf_len) {
   }
 #endif
 
-  static const char kPingEntry[] = ",</ping>;rt=\"esphome.ping\";if=\"if.a\";ct=112";
-  size_t ping_len = sizeof(kPingEntry) - 1;
+  static const char PING_ENTRY[] = R"(,</ping>;rt="esphome.ping";if="if.a";ct=112)";
+  size_t ping_len = sizeof(PING_ENTRY) - 1;
   if (buf != nullptr && total + ping_len <= buf_len)
-    memcpy(buf + total, kPingEntry, ping_len);
+    memcpy(buf + total, PING_ENTRY, ping_len);
   total += ping_len;
   return total;
 }
 
 void CoapServer::apply_entity_post(EntityBase *entity, EntityType type, ActionType action, const uint8_t *payload,
                                    size_t payload_len) {
-  if (payload_len == 0 || payload_len > COAP_PAYLOAD_MAX_SIZE)
+  if (payload_len == 0 || payload_len > COAP_PAYLOAD_MAX_SIZE) {
+    ESP_LOGW(TAG, "CoAP: POST payload_len %u rejected (max %u)", (unsigned) payload_len,
+             (unsigned) COAP_PAYLOAD_MAX_SIZE);
     return;
+  }
   CborParser parser;
   CborValue root, map_val;
-  if (cbor_parser_init(payload, payload_len, 0, &parser, &root) != CborNoError || !cbor_value_is_map(&root) ||
-      cbor_value_enter_container(&root, &map_val) != CborNoError)
+  if (cbor_parser_init(payload, payload_len, 0, &parser, &root) != CBOR_NO_ERROR || !cbor_value_is_map(&root) ||
+      cbor_value_enter_container(&root, &map_val) != CBOR_NO_ERROR)
     return;
   while (!cbor_value_at_end(&map_val)) {
     int key = 0;
-    bool key_ok = cbor_value_get_int(&map_val, &key) == CborNoError;
+    bool key_ok = cbor_value_get_int(&map_val, &key) == CBOR_NO_ERROR;
     cbor_value_advance(&map_val);
     if (cbor_value_at_end(&map_val))
       break;
@@ -242,16 +245,18 @@ void CoapServer::apply_entity_post(EntityBase *entity, EntityType type, ActionTy
       case ENTITYTYPE_SWITCH:
         if (key_ok && key == 4 && cbor_value_is_boolean(&map_val)) {
           bool val = false;
-          if (cbor_value_get_boolean(&map_val, &val) == CborNoError) {
+          if (cbor_value_get_boolean(&map_val, &val) == CBOR_NO_ERROR) {
             auto *sw = static_cast<switch_::Switch *>(entity);
             if (action == ACTIONTYPE_TOGGLE) {
-              if (val)
+              if (val) {
                 sw->toggle();
+              }
             } else {
-              if (val)
+              if (val) {
                 sw->turn_on();
-              else
+              } else {
                 sw->turn_off();
+              }
             }
           }
         }
@@ -263,10 +268,10 @@ void CoapServer::apply_entity_post(EntityBase *entity, EntityType type, ActionTy
           double d = 0.0;
           bool got = false;
           if (cbor_value_is_float(&map_val) || cbor_value_is_double(&map_val) || cbor_value_is_half_float(&map_val)) {
-            got = cbor_value_get_double(&map_val, &d) == CborNoError;
+            got = cbor_value_get_double(&map_val, &d) == CBOR_NO_ERROR;
           } else if (cbor_value_is_integer(&map_val)) {
             int64_t i = 0;
-            if (cbor_value_get_int64(&map_val, &i) == CborNoError) {
+            if (cbor_value_get_int64(&map_val, &i) == CBOR_NO_ERROR) {
               d = static_cast<double>(i);
               got = true;
             }
@@ -280,12 +285,13 @@ void CoapServer::apply_entity_post(EntityBase *entity, EntityType type, ActionTy
       case ENTITYTYPE_LOCK:
         if (key_ok && key == 4 && cbor_value_is_boolean(&map_val)) {
           bool val = false;
-          if (cbor_value_get_boolean(&map_val, &val) == CborNoError) {
+          if (cbor_value_get_boolean(&map_val, &val) == CBOR_NO_ERROR) {
             auto *lk = static_cast<lock::Lock *>(entity);
-            if (val)
+            if (val) {
               lk->lock();
-            else
+            } else {
               lk->unlock();
+            }
           }
         }
         break;
@@ -294,16 +300,18 @@ void CoapServer::apply_entity_post(EntityBase *entity, EntityType type, ActionTy
       case ENTITYTYPE_VALVE:
         if (key_ok && key == 4 && cbor_value_is_boolean(&map_val)) {
           bool val = false;
-          if (cbor_value_get_boolean(&map_val, &val) == CborNoError) {
+          if (cbor_value_get_boolean(&map_val, &val) == CBOR_NO_ERROR) {
             auto *vv = static_cast<valve::Valve *>(entity);
             if (action == ACTIONTYPE_STOP) {
-              if (val)
+              if (val) {
                 vv->make_call().set_command_stop().perform();
+              }
             } else {
-              if (val)
+              if (val) {
                 vv->make_call().set_command_open().perform();
-              else
+              } else {
                 vv->make_call().set_command_close().perform();
+              }
             }
           }
         }
@@ -320,35 +328,35 @@ void CoapServer::apply_entity_post(EntityBase *entity, EntityType type, ActionTy
 
 // Encode the OSCORE HKDF info array per RFC 8613 §3.2.1:
 // [id (bstr), id_context (bstr / null), alg (int = 10), type (tstr), L (uint)]
-static size_t oscore_build_info_(uint8_t *buf, size_t buf_len, const uint8_t *id, size_t id_len,
-                                 const uint8_t *id_context, size_t id_context_len, const char *type, uint8_t L) {
-  static const uint8_t kEmpty[1] = {};
+static size_t oscore_build_info(uint8_t *buf, size_t buf_len, const uint8_t *id, size_t id_len,
+                                const uint8_t *id_context, size_t id_context_len, const char *type, uint8_t key_len) {
+  static const uint8_t EMPTY_BUF[1] = {};
   CborEncoder enc, arr;
   cbor_encoder_init(&enc, buf, buf_len, 0);
-  if (cbor_encoder_create_array(&enc, &arr, 5) != CborNoError)
+  if (cbor_encoder_create_array(&enc, &arr, 5) != CBOR_NO_ERROR)
     return 0;
-  if (cbor_encode_byte_string(&arr, id_len > 0 ? id : kEmpty, id_len) != CborNoError)
+  if (cbor_encode_byte_string(&arr, id_len > 0 ? id : EMPTY_BUF, id_len) != CBOR_NO_ERROR)
     return 0;
   if (id_context_len > 0) {
-    if (cbor_encode_byte_string(&arr, id_context, id_context_len) != CborNoError)
+    if (cbor_encode_byte_string(&arr, id_context, id_context_len) != CBOR_NO_ERROR)
       return 0;
   } else {
-    if (cbor_encode_null(&arr) != CborNoError)
+    if (cbor_encode_null(&arr) != CBOR_NO_ERROR)
       return 0;
   }
-  if (cbor_encode_int(&arr, 10) != CborNoError)  // AEAD_AES_128_CCM
+  if (cbor_encode_int(&arr, 10) != CBOR_NO_ERROR)  // AEAD_AES_128_CCM
     return 0;
-  if (cbor_encode_text_stringz(&arr, type) != CborNoError)
+  if (cbor_encode_text_stringz(&arr, type) != CBOR_NO_ERROR)
     return 0;
-  if (cbor_encode_uint(&arr, L) != CborNoError)
+  if (cbor_encode_uint(&arr, key_len) != CBOR_NO_ERROR)
     return 0;
-  if (cbor_encoder_close_container(&enc, &arr) != CborNoError)
+  if (cbor_encoder_close_container(&enc, &arr) != CBOR_NO_ERROR)
     return 0;
   return cbor_encoder_get_buffer_size(&enc, buf);
 }
 
-static bool oscore_hkdf_(const uint8_t *secret, size_t secret_len, const uint8_t *salt, size_t salt_len,
-                         const uint8_t *info, size_t info_len, uint8_t *okm, size_t okm_len) {
+static bool oscore_hkdf(const uint8_t *secret, size_t secret_len, const uint8_t *salt, size_t salt_len,
+                        const uint8_t *info, size_t info_len, uint8_t *okm, size_t okm_len) {
   psa_key_derivation_operation_t op = PSA_KEY_DERIVATION_OPERATION_INIT;
   psa_status_t s = psa_key_derivation_setup(&op, PSA_ALG_HKDF(PSA_ALG_SHA_256));
   if (s == PSA_SUCCESS && salt_len > 0)
@@ -370,11 +378,11 @@ bool CoapServer::oscore_derive_keys_() {
 
   // Sender key — derive and store raw bytes; imported as transient PSA key per encrypt call
   info_len =
-      oscore_build_info_(info_buf, sizeof(info_buf), this->oscore_sender_id_.data(), this->oscore_sender_id_.size(),
-                         this->oscore_id_context_.data(), this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
-  if (info_len == 0 || !oscore_hkdf_(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
-                                     this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
-                                     info_len, key_buf, OSCORE_KEY_LEN)) {
+      oscore_build_info(info_buf, sizeof(info_buf), this->oscore_sender_id_.data(), this->oscore_sender_id_.size(),
+                        this->oscore_id_context_.data(), this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
+  if (info_len == 0 || !oscore_hkdf(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
+                                    this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
+                                    info_len, key_buf, OSCORE_KEY_LEN)) {
     ESP_LOGE(TAG, "OSCORE sender key derivation failed");
     return false;
   }
@@ -382,12 +390,12 @@ bool CoapServer::oscore_derive_keys_() {
   memset(key_buf, 0, sizeof(key_buf));
 
   // Recipient key — derive and store raw bytes; imported as transient PSA key per decrypt call
-  info_len = oscore_build_info_(info_buf, sizeof(info_buf), this->oscore_recipient_id_.data(),
-                                this->oscore_recipient_id_.size(), this->oscore_id_context_.data(),
-                                this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
-  if (info_len == 0 || !oscore_hkdf_(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
-                                     this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
-                                     info_len, key_buf, OSCORE_KEY_LEN)) {
+  info_len = oscore_build_info(info_buf, sizeof(info_buf), this->oscore_recipient_id_.data(),
+                               this->oscore_recipient_id_.size(), this->oscore_id_context_.data(),
+                               this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
+  if (info_len == 0 || !oscore_hkdf(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
+                                    this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
+                                    info_len, key_buf, OSCORE_KEY_LEN)) {
     ESP_LOGE(TAG, "OSCORE recipient key derivation failed");
     return false;
   }
@@ -395,11 +403,11 @@ bool CoapServer::oscore_derive_keys_() {
   memset(key_buf, 0, sizeof(key_buf));
 
   // Common IV — stored as raw bytes for nonce construction (not an AEAD key)
-  info_len = oscore_build_info_(info_buf, sizeof(info_buf), nullptr, 0, this->oscore_id_context_.data(),
-                                this->oscore_id_context_.size(), "IV", OSCORE_IV_LEN);
-  if (info_len == 0 || !oscore_hkdf_(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
-                                     this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
-                                     info_len, this->oscore_common_iv_, OSCORE_IV_LEN)) {
+  info_len = oscore_build_info(info_buf, sizeof(info_buf), nullptr, 0, this->oscore_id_context_.data(),
+                               this->oscore_id_context_.size(), "IV", OSCORE_IV_LEN);
+  if (info_len == 0 || !oscore_hkdf(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
+                                    this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
+                                    info_len, this->oscore_common_iv_, OSCORE_IV_LEN)) {
     ESP_LOGE(TAG, "OSCORE common IV derivation failed");
     return false;
   }
@@ -447,40 +455,40 @@ size_t CoapServer::oscore_build_aad(const uint8_t *kid, uint8_t kid_len, const u
   uint8_t aad_array_buf[32];
   CborEncoder enc, arr;
   cbor_encoder_init(&enc, aad_array_buf, sizeof(aad_array_buf), 0);
-  if (cbor_encoder_create_array(&enc, &arr, 5) != CborNoError)
+  if (cbor_encoder_create_array(&enc, &arr, 5) != CBOR_NO_ERROR)
     return 0;
-  if (cbor_encode_uint(&arr, 1) != CborNoError)  // oscore_version
+  if (cbor_encode_uint(&arr, 1) != CBOR_NO_ERROR)  // oscore_version
     return 0;
   CborEncoder alg_arr;
-  if (cbor_encoder_create_array(&arr, &alg_arr, 1) != CborNoError)
+  if (cbor_encoder_create_array(&arr, &alg_arr, 1) != CBOR_NO_ERROR)
     return 0;
-  if (cbor_encode_int(&alg_arr, 10) != CborNoError)  // AES-CCM-16-64-128
+  if (cbor_encode_int(&alg_arr, 10) != CBOR_NO_ERROR)  // AES-CCM-16-64-128
     return 0;
-  if (cbor_encoder_close_container(&arr, &alg_arr) != CborNoError)
+  if (cbor_encoder_close_container(&arr, &alg_arr) != CBOR_NO_ERROR)
     return 0;
-  if (cbor_encode_byte_string(&arr, kid, kid_len) != CborNoError)
+  if (cbor_encode_byte_string(&arr, kid, kid_len) != CBOR_NO_ERROR)
     return 0;
-  if (cbor_encode_byte_string(&arr, piv, piv_len) != CborNoError)
+  if (cbor_encode_byte_string(&arr, piv, piv_len) != CBOR_NO_ERROR)
     return 0;
-  static const uint8_t kEmpty[1] = {};
-  if (cbor_encode_byte_string(&arr, kEmpty, 0) != CborNoError)  // class-I options (empty)
+  static const uint8_t EMPTY_BUF[1] = {};
+  if (cbor_encode_byte_string(&arr, EMPTY_BUF, 0) != CBOR_NO_ERROR)  // class-I options (empty)
     return 0;
-  if (cbor_encoder_close_container(&enc, &arr) != CborNoError)
+  if (cbor_encoder_close_container(&enc, &arr) != CBOR_NO_ERROR)
     return 0;
   size_t aad_array_len = cbor_encoder_get_buffer_size(&enc, aad_array_buf);
 
   // Enc_Structure = ["Encrypt0", h'', aad_array_bstr]
   CborEncoder outer, outer_arr;
   cbor_encoder_init(&outer, buf, buf_len, 0);
-  if (cbor_encoder_create_array(&outer, &outer_arr, 3) != CborNoError)
+  if (cbor_encoder_create_array(&outer, &outer_arr, 3) != CBOR_NO_ERROR)
     return 0;
-  if (cbor_encode_text_stringz(&outer_arr, "Encrypt0") != CborNoError)
+  if (cbor_encode_text_stringz(&outer_arr, "Encrypt0") != CBOR_NO_ERROR)
     return 0;
-  if (cbor_encode_byte_string(&outer_arr, kEmpty, 0) != CborNoError)
+  if (cbor_encode_byte_string(&outer_arr, EMPTY_BUF, 0) != CBOR_NO_ERROR)
     return 0;
-  if (cbor_encode_byte_string(&outer_arr, aad_array_buf, aad_array_len) != CborNoError)
+  if (cbor_encode_byte_string(&outer_arr, aad_array_buf, aad_array_len) != CBOR_NO_ERROR)
     return 0;
-  if (cbor_encoder_close_container(&outer, &outer_arr) != CborNoError)
+  if (cbor_encoder_close_container(&outer, &outer_arr) != CBOR_NO_ERROR)
     return 0;
   return cbor_encoder_get_buffer_size(&outer, buf);
 }
@@ -670,9 +678,10 @@ size_t CoapServer::oscore_build_inner_cbor(uint8_t code, const uint8_t *payload,
 }
 
 void CoapServer::oscore_save_seq_no_() {
-  if (this->oscore_sender_seq_no_ >= OSCORE_SEQ_WARN)
+  if (this->oscore_sender_seq_no_ >= OSCORE_SEQ_WARN) {
     ESP_LOGW(TAG, "OSCORE: sender sequence number approaching exhaustion (%" PRIu32 " / %" PRIu32 ")",
              this->oscore_sender_seq_no_, (uint32_t) UINT32_MAX);
+  }
   nvs_handle_t handle;
   if (nvs_open("coap_oscore", NVS_READWRITE, &handle) != ESP_OK) {
     ESP_LOGE(TAG, "OSCORE: failed to open NVS for sequence number save");
@@ -713,7 +722,7 @@ void CoapServer::log_append_entry_(uint8_t level, const char *tag, const char *m
   if (entry_size > sizeof(entry_buf))
     return;
 
-  std::lock_guard<std::mutex> guard(this->log_mutex_);
+  std::scoped_lock guard(this->log_mutex_);
   if (this->log_buf_pos_ + entry_size + 1 > LOG_BUF_SIZE)
     return;
   memcpy(this->log_buf_ + this->log_buf_pos_, entry_buf, entry_size);
@@ -722,7 +731,7 @@ void CoapServer::log_append_entry_(uint8_t level, const char *tag, const char *m
 }
 
 size_t CoapServer::take_log_payload_(uint8_t *out) {
-  std::lock_guard<std::mutex> guard(this->log_mutex_);
+  std::scoped_lock guard(this->log_mutex_);
   if (!this->log_buf_has_data_)
     return 0;
   this->log_buf_[this->log_buf_pos_] = 0xFF;  // CBOR break byte — closes the indefinite array
@@ -753,44 +762,60 @@ size_t CoapServer::build_ping_payload(uint8_t *buf, bool boot_signal) {
 size_t CoapServer::count_resources() {
   size_t n = 2;  // .well-known/core + info
 #ifdef USE_BINARY_SENSOR
-  for (auto *e : App.get_binary_sensors())
-    if (!e->is_internal())
+  for (auto *e : App.get_binary_sensors()) {
+    if (!e->is_internal()) {
       n++;
+    }
+  }
 #endif
 #ifdef USE_BUTTON
-  for (auto *e : App.get_buttons())
-    if (!e->is_internal())
+  for (auto *e : App.get_buttons()) {
+    if (!e->is_internal()) {
       n++;
+    }
+  }
 #endif
 #ifdef USE_LOCK
-  for (auto *e : App.get_locks())
-    if (!e->is_internal())
+  for (auto *e : App.get_locks()) {
+    if (!e->is_internal()) {
       n++;
+    }
+  }
 #endif
 #ifdef USE_NUMBER
-  for (auto *e : App.get_numbers())
-    if (!e->is_internal())
+  for (auto *e : App.get_numbers()) {
+    if (!e->is_internal()) {
       n++;
+    }
+  }
 #endif
 #ifdef USE_SENSOR
-  for (auto *e : App.get_sensors())
-    if (!e->is_internal())
+  for (auto *e : App.get_sensors()) {
+    if (!e->is_internal()) {
       n++;
+    }
+  }
 #endif
 #ifdef USE_SWITCH
-  for (auto *e : App.get_switches())
-    if (!e->is_internal())
+  for (auto *e : App.get_switches()) {
+    if (!e->is_internal()) {
       n += 2;
+    }
+  }
 #endif
 #ifdef USE_TEXT_SENSOR
-  for (auto *e : App.get_text_sensors())
-    if (!e->is_internal())
+  for (auto *e : App.get_text_sensors()) {
+    if (!e->is_internal()) {
       n++;
+    }
+  }
 #endif
 #ifdef USE_VALVE
-  for (auto *e : App.get_valves())
-    if (!e->is_internal())
+  for (auto *e : App.get_valves()) {
+    if (!e->is_internal()) {
       n += 2;
+    }
+  }
 #endif
 #ifdef USE_LOGGER
   n++;
@@ -814,17 +839,17 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
   put(res.path, strlen(res.path));
   put(">", 1);
   if (res.type == ENTITYTYPE_DEVICE) {
-    put(";rt=\"esphome.device\";if=\"if.a\";ct=60", sizeof(";rt=\"esphome.device\";if=\"if.a\";ct=60") - 1);
+    put(R"(;rt="esphome.device";if="if.a";ct=60)", sizeof(R"(;rt="esphome.device";if="if.a";ct=60)") - 1);
     return static_cast<uint16_t>(p - buf);
   }
 #ifdef USE_LOGGER
   if (res.type == ENTITYTYPE_LOG) {
-    put(";rt=\"esphome.log\";if=\"if.s\";ct=112;obs", sizeof(";rt=\"esphome.log\";if=\"if.s\";ct=112;obs") - 1);
+    put(R"(;rt="esphome.log";if="if.s";ct=112;obs)", sizeof(R"(;rt="esphome.log";if="if.s";ct=112;obs)") - 1);
     return static_cast<uint16_t>(p - buf);
   }
 #endif
   if (res.action != ACTIONTYPE_NO_ACTION) {
-    put(";rt=\"esphome.action\";if=\"if.a\";ct=112", sizeof(";rt=\"esphome.action\";if=\"if.a\";ct=112") - 1);
+    put(R"(;rt="esphome.action";if="if.a";ct=112)", sizeof(R"(;rt="esphome.action";if="if.a";ct=112)") - 1);
     const char *action_title;
     switch (res.action) {
       case ACTIONTYPE_TOGGLE:
@@ -853,9 +878,9 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
   put(";rt=\"esphome.", sizeof(";rt=\"esphome.") - 1);
   put(res.domain, strlen(res.domain));
   if (res.observable) {
-    put("\";if=\"if.s\";ct=112;obs", sizeof("\";if=\"if.s\";ct=112;obs") - 1);
+    put(R"(";if="if.s";ct=112;obs)", sizeof(R"(";if="if.s";ct=112;obs)") - 1);
   } else {
-    put("\";if=\"if.a\";ct=112", sizeof("\";if=\"if.a\";ct=112") - 1);
+    put(R"(";if="if.a";ct=112)", sizeof(R"(";if="if.a";ct=112)") - 1);
   }
   if (res.entity != nullptr) {
     put(";title=\"", sizeof(";title=\"") - 1);
@@ -874,7 +899,7 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
 #endif
     if (res.type == ENTITYTYPE_SENSOR) {
       const auto uom_ref = res.entity->get_unit_of_measurement_ref();
-      if (uom_ref.size() > 0) {
+      if (!uom_ref.empty()) {
         put(";uom=\"", sizeof(";uom=\"") - 1);
         put(uom_ref.c_str(), uom_ref.size());
         put("\"", 1);

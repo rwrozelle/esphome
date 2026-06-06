@@ -8,7 +8,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <errno.h>
+#include <cerrno>
 #ifdef USE_COAP_OSCORE
 #include "nvs.h"
 #include <psa/crypto.h>
@@ -69,6 +69,19 @@ void CoapServerNet::setup() {
 
   fcntl(this->sock_, F_SETFL, fcntl(this->sock_, F_GETFL, 0) | O_NONBLOCK);
   ESP_LOGI(TAG, "CoAP Net server started on port %u", USE_COAP_SERVER_PORT);
+#ifdef USE_WIFI_TWT
+  if (wifi_twt::global_wifi_twt_component != nullptr) {
+    wifi_twt::global_wifi_twt_component->add_on_start_callback([this]() { this->twt_queuing_enabled_ = true; });
+    wifi_twt::global_wifi_twt_component->add_on_wakeup_callback([this]() {
+      this->flush_twt_queue_();
+      this->twt_queuing_enabled_ = false;  // We're awake now — send directly
+    });
+    wifi_twt::global_wifi_twt_component->add_on_stop_callback([this]() {
+      this->flush_twt_queue_();
+      this->twt_queuing_enabled_ = false;
+    });
+  }
+#endif
 
   this->resources_.init(CoapServer::count_resources());
 
@@ -92,44 +105,60 @@ void CoapServerNet::setup() {
 
   uint16_t senml_index = 1;
 #ifdef USE_BINARY_SENSOR
-  for (auto *e : App.get_binary_sensors())
-    if (!e->is_internal())
+  for (auto *e : App.get_binary_sensors()) {
+    if (!e->is_internal()) {
       add_net_resource_(ENTITYTYPE_BINARY_SENSOR, e, true, senml_index);
+    }
+  }
 #endif
 #ifdef USE_BUTTON
-  for (auto *e : App.get_buttons())
-    if (!e->is_internal())
+  for (auto *e : App.get_buttons()) {
+    if (!e->is_internal()) {
       add_net_resource_(ENTITYTYPE_BUTTON, e, false, senml_index);
+    }
+  }
 #endif
 #ifdef USE_LOCK
-  for (auto *e : App.get_locks())
-    if (!e->is_internal())
+  for (auto *e : App.get_locks()) {
+    if (!e->is_internal()) {
       add_net_resource_(ENTITYTYPE_LOCK, e, true, senml_index);
+    }
+  }
 #endif
 #ifdef USE_NUMBER
-  for (auto *e : App.get_numbers())
-    if (!e->is_internal())
+  for (auto *e : App.get_numbers()) {
+    if (!e->is_internal()) {
       add_net_resource_(ENTITYTYPE_NUMBER, e, true, senml_index);
+    }
+  }
 #endif
 #ifdef USE_SENSOR
-  for (auto *e : App.get_sensors())
-    if (!e->is_internal())
+  for (auto *e : App.get_sensors()) {
+    if (!e->is_internal()) {
       add_net_resource_(ENTITYTYPE_SENSOR, e, true, senml_index);
+    }
+  }
 #endif
 #ifdef USE_SWITCH
-  for (auto *e : App.get_switches())
-    if (!e->is_internal())
+  for (auto *e : App.get_switches()) {
+    if (!e->is_internal()) {
       add_net_resource_(ENTITYTYPE_SWITCH, e, true, senml_index);
+    }
+  }
 #endif
 #ifdef USE_TEXT_SENSOR
-  for (auto *e : App.get_text_sensors())
-    if (!e->is_internal())
+  for (auto *e : App.get_text_sensors()) {
+    if (!e->is_internal()) {
       add_net_resource_(ENTITYTYPE_TEXT_SENSOR, e, true, senml_index);
+    }
+  }
 #endif
 #ifdef USE_VALVE
-  for (auto *e : App.get_valves())
-    if (!e->is_internal())
+  for (auto *e : App.get_valves()) {
+    if (!e->is_internal()) {
       add_net_resource_(ENTITYTYPE_VALVE, e, true, senml_index);
+    }
+  }
 #endif
 #ifdef USE_LOGGER
   add_net_resource_(ENTITYTYPE_LOG, nullptr, true, senml_index);
@@ -170,6 +199,10 @@ bool CoapServerNet::teardown() {
     close(this->sock_);
     this->sock_ = -1;
   }
+#ifdef USE_WIFI_TWT
+  this->twt_queuing_enabled_ = false;
+  this->twt_queue_.clear();
+#endif
   return true;
 }
 
@@ -312,7 +345,7 @@ void CoapServerNet::process_datagram_(const uint8_t *buf, size_t len, const sock
     ESP_LOGW(TAG, "CoAP Net: malformed packet, dropping");
     return;
   }
-  ESP_LOGV(TAG, "CoAP Net: rx type=%u code=0x%02x path=%s", pkt.type, pkt.code, pkt.uri_path);
+  ESP_LOGD(TAG, "CoAP Net: rx type=%u code=0x%02x path=%s len=%u", pkt.type, pkt.code, pkt.uri_path, (unsigned) len);
 
   if (pkt.type == 2 || pkt.type == 3) {  // ACK or RST — response to a CON notification we sent
     handle_con_response_(pkt, *peer);
@@ -364,10 +397,51 @@ void CoapServerNet::process_datagram_(const uint8_t *buf, size_t len, const sock
 // ---------------------------------------------------------------------------
 
 void CoapServerNet::send_response(const uint8_t *buf, size_t len, const sockaddr_in6 *peer) {
+#ifdef USE_WIFI_TWT
+  if (this->twt_queuing_enabled_) {
+    TwtQueueEntry entry;
+    entry.len = static_cast<uint16_t>(std::min(len, sizeof(entry.data)));
+    memcpy(entry.data, buf, entry.len);
+    entry.peer = *peer;
+    if (!this->twt_queue_.push(entry)) {
+      ESP_LOGW(TAG, "CoAP Net: TWT queue full, dropping oldest response");
+      this->twt_queue_.pop();
+      this->twt_queue_.push(entry);
+    }
+    return;
+  }
+#endif
   if (this->sock_ < 0)
     return;
-  sendto(this->sock_, buf, len, 0, (const struct sockaddr *) peer, sizeof(*peer));
+  ESP_LOGD(TAG, "CoAP Net: tx code=0x%02x len=%u", len > 1 ? buf[1] : 0u, (unsigned) len);
+  ssize_t sent = sendto(this->sock_, buf, len, 0, (const struct sockaddr *) peer, sizeof(*peer));
+  if (sent < 0) {
+    ESP_LOGW(TAG, "CoAP Net: sendto failed errno=%d", errno);
+  } else if ((size_t) sent != len) {
+    ESP_LOGW(TAG, "CoAP Net: sendto short write: %d of %u bytes", (int) sent, (unsigned) len);
+  }
 }
+
+#ifdef USE_WIFI_TWT
+void CoapServerNet::flush_twt_queue_() {
+  this->twt_queuing_enabled_ = false;
+  if (this->twt_queue_.empty())
+    return;
+  while (!this->twt_queue_.empty()) {
+    TwtQueueEntry entry = this->twt_queue_.front();
+    this->twt_queue_.pop();
+    if (this->sock_ >= 0) {
+      ESP_LOGD(TAG, "CoAP Net: TWT flush tx code=0x%02x len=%u", entry.len > 1 ? entry.data[1] : 0u,
+               (unsigned) entry.len);
+      ssize_t sent =
+          sendto(this->sock_, entry.data, entry.len, 0, (const struct sockaddr *) &entry.peer, sizeof(entry.peer));
+      if (sent < 0) {
+        ESP_LOGW(TAG, "CoAP Net: TWT flush sendto failed errno=%d", errno);
+      }
+    }
+  }
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // handle_well_known_core_
@@ -428,7 +502,7 @@ void CoapServerNet::handle_ping_request_(const CoapPacket &pkt, const sockaddr_i
   }
 
   uint8_t payload_buf[16];
-  size_t plen = this->build_ping_payload(payload_buf, boot_signal);
+  size_t plen = CoapServer::build_ping_payload(payload_buf, boot_signal);
 
   this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
   uint8_t cf = 60;
@@ -467,16 +541,18 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
         break;
       uint8_t od = (dl >> 4) & 0x0F;
       uint8_t ol = dl & 0x0F;
-      if (od == 13)
+      if (od == 13) {
         inner_pos++;
-      else if (od == 14)
+      } else if (od == 14) {
         inner_pos += 2;
-      if (ol == 13)
+      }
+      if (ol == 13) {
         inner_pos++;
-      else if (ol == 14)
+      } else if (ol == 14) {
         inner_pos += 2;
-      else
+      } else {
         inner_pos += ol;
+      }
     }
     payload_ptr = this->oscore_plain_ + inner_pos;
     payload_len = (uint16_t) (oscore_plain_len - inner_pos);
@@ -495,6 +571,8 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
       if (pkt.observe == 0) {
         bool is_con = (pkt.type == 0);
         if (this->get_subscription_confirm() != is_con) {
+          ESP_LOGW(TAG, "CoAP Net: observe type mismatch on /%s (want %s, got %s)", resource->path,
+                   this->get_subscription_confirm() ? "CON" : "NON", is_con ? "CON" : "NON");
           this->builder_.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
           send_response(this->builder_.buf, this->builder_.pos, &peer);
           return;
@@ -669,9 +747,9 @@ void CoapServerNet::on_entity_update(EntityBase *entity) {
   if (entity->is_internal())
     return;
   NetCoapResource *resource = nullptr;
-  for (size_t i = 0; i < this->resources_.size(); i++) {
-    if (this->resources_[i].entity == entity && this->resources_[i].observable) {
-      resource = &this->resources_[i];
+  for (auto &r : this->resources_) {
+    if (r.entity == entity && r.observable) {
+      resource = &r;
       break;
     }
   }
@@ -795,9 +873,9 @@ void CoapServerNet::add_net_resource_(EntityType type, EntityBase *entity, bool 
 }
 
 NetCoapResource *CoapServerNet::find_resource_(const char *path) {
-  for (size_t i = 0; i < this->resources_.size(); i++) {
-    if (strcmp(this->resources_[i].path, path) == 0)
-      return &this->resources_[i];
+  for (auto &r : this->resources_) {
+    if (strcmp(r.path, path) == 0)
+      return &r;
   }
   return nullptr;
 }
@@ -840,9 +918,10 @@ NetCoapClient *CoapServerNet::new_client_(const sockaddr_in6 &peer) {
 }
 
 NetCoapClient *CoapServerNet::find_client_(const sockaddr_in6 &peer) {
-  for (auto &c : this->active_clients_)
+  for (auto &c : this->active_clients_) {
     if (c.active && memcmp(&c.peer_addr.sin6_addr, &peer.sin6_addr, sizeof(peer.sin6_addr)) == 0)
       return &c;
+  }
   return nullptr;
 }
 
@@ -992,8 +1071,10 @@ bool CoapServerNet::oscore_unprotect_request_(const CoapPacket &pkt, const NetCo
     ESP_LOGW(TAG, "OSCORE: request on protected resource /%s without OSCORE option", resource->path);
     return false;
   }
-  if (pkt.payload_len == 0 || pkt.payload_len > 256)
+  if (pkt.payload_len == 0 || pkt.payload_len > 256) {
+    ESP_LOGW(TAG, "OSCORE: request payload_len %u out of range on /%s", pkt.payload_len, resource->path);
     return false;
+  }
   return this->oscore_unprotect_core_(pkt.oscore_opt, pkt.oscore_opt_len, pkt.payload, pkt.payload_len, plaintext,
                                       plaintext_buf_len, plaintext_len, req_info);
 }
@@ -1041,14 +1122,14 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_i
     if (obs != nullptr)
       free_observer_(obs);
   }
-  static const uint8_t kEmpty[] = {0x80};
+  static const uint8_t EMPTY_CBOR_ARRAY[] = {0x80};
   this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
   if (pkt.observe_present && pkt.observe == 0)
     this->builder_.option_uint(6, 0);
   uint8_t cf = 60;
   this->builder_.option(12, &cf, 1);
   this->builder_.payload_marker();
-  this->builder_.append(kEmpty, sizeof(kEmpty));
+  this->builder_.append(EMPTY_CBOR_ARRAY, sizeof(EMPTY_CBOR_ARRAY));
   send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 #endif

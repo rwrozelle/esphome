@@ -7,7 +7,7 @@
 #define CBOR_CHECK(expr) \
   do { \
     CborError cbor_err_ = (expr); \
-    if (cbor_err_ != CborNoError) \
+    if (cbor_err_ != CBOR_NO_ERROR) \
       return cbor_err_; \
   } while (0)
 #endif
@@ -40,7 +40,7 @@ static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_
   }
   CBOR_CHECK(cbor_encoder_close_container(&encoder, &map_encoder));
   *encoded_len = cbor_encoder_get_buffer_size(&encoder, buffer);
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 #endif  // USE_SENSOR
 
@@ -53,7 +53,7 @@ static CborError encode_bool_entity(uint8_t *buffer, size_t buf_len, size_t *enc
   CBOR_CHECK(cbor_encode_boolean(&map_encoder, state));
   CBOR_CHECK(cbor_encoder_close_container(&encoder, &map_encoder));
   *encoded_len = cbor_encoder_get_buffer_size(&encoder, buffer);
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 #endif
 
@@ -83,7 +83,7 @@ static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_
   }
   CBOR_CHECK(cbor_encoder_close_container(&encoder, &map_encoder));
   *encoded_len = cbor_encoder_get_buffer_size(&encoder, buffer);
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 #endif  // USE_TEXT_SENSOR
 
@@ -102,7 +102,7 @@ static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_
   }
   CBOR_CHECK(cbor_encoder_close_container(&encoder, &map_encoder));
   *encoded_len = cbor_encoder_get_buffer_size(&encoder, buffer);
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 #endif  // USE_NUMBER
 
@@ -115,7 +115,7 @@ static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_
   CBOR_CHECK(cbor_encode_uint(&map_encoder, static_cast<uint8_t>(entity->state)));
   CBOR_CHECK(cbor_encoder_close_container(&encoder, &map_encoder));
   *encoded_len = cbor_encoder_get_buffer_size(&encoder, buffer);
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 #endif  // USE_LOCK
 
@@ -128,7 +128,7 @@ static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_
   CBOR_CHECK(cbor_encode_float(&map_encoder, entity->position));
   CBOR_CHECK(cbor_encoder_close_container(&encoder, &map_encoder));
   *encoded_len = cbor_encoder_get_buffer_size(&encoder, buffer);
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 #endif  // USE_VALVE
 
@@ -138,12 +138,12 @@ static CborError encode_entity(uint8_t *buffer, size_t buf_len, size_t *encoded_
   CBOR_CHECK(cbor_encoder_create_map(&encoder, &map_encoder, 0));
   CBOR_CHECK(cbor_encoder_close_container(&encoder, &map_encoder));
   *encoded_len = cbor_encoder_get_buffer_size(&encoder, buffer);
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 
 size_t CoapServer::cbor_output_(uint8_t *buffer, size_t buf_len, EntityBase *entity, EntityType type) {
   size_t encoded_len = 0;
-  CborError err = CborNoError;
+  CborError err = CBOR_NO_ERROR;
   // NOLINTBEGIN(bugprone-branch-clone)
   switch (type) {
 #ifdef USE_SENSOR
@@ -191,8 +191,8 @@ size_t CoapServer::cbor_output_(uint8_t *buffer, size_t buf_len, EntityBase *ent
       break;
   }
   // NOLINTEND(bugprone-branch-clone)
-  if (err != CborNoError) {
-    if (err == CborErrorOutOfMemory && entity != nullptr) {
+  if (err != CBOR_NO_ERROR) {
+    if (err == CBOR_ERROR_OUT_OF_MEMORY && entity != nullptr) {
       ESP_LOGE(TAG, "CBOR encode: state of '%s' exceeds %u-byte buffer — truncated to nothing",
                entity->get_name().c_str(), (unsigned) buf_len);
     } else {
@@ -302,13 +302,13 @@ static CborError encode_device_info_impl(uint8_t *buf, size_t buf_len, size_t *e
 #endif
   CBOR_CHECK(cbor_encoder_close_container(&enc, &map));
   *encoded_len = cbor_encoder_get_buffer_size(&enc, buf);
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 
 size_t CoapServer::encode_device_info(uint8_t *buf, size_t buf_len, CoapServer *server) {
   size_t encoded_len = 0;
   CborError err = encode_device_info_impl(buf, buf_len, &encoded_len, server);
-  if (err != CborNoError) {
+  if (err != CBOR_NO_ERROR) {
     ESP_LOGE(TAG, "encode_device_info error: %d", err);
     return 0;
   }

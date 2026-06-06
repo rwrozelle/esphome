@@ -28,6 +28,7 @@ from .const import (
     CONF_SERVER_PING_TIMEOUT_RATIO,
     CONF_SUBSCRIPTION_CONFIRM,
     CONF_TRANSPORT,
+    CONF_TWT_QUEUE_DEPTH,
 )
 
 DOMAIN = "coap_server"
@@ -154,6 +155,14 @@ def _validate_transport(config):
     return config
 
 
+def _validate_twt(config):
+    if CONF_TWT_QUEUE_DEPTH in config and "wifi_twt" not in CORE.loaded_integrations:
+        raise cv.Invalid(
+            f"'{CONF_TWT_QUEUE_DEPTH}' requires the 'wifi_twt' component to be configured"
+        )
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -194,10 +203,13 @@ CONFIG_SCHEMA = cv.All(
             ),
             # Optional OSCORE, if setup then client must send calls including OSCORE credentials
             cv.Optional(CONF_OSCORE): OSCORE_SCHEMA,
+            # Only valid when wifi_twt is configured
+            cv.Optional(CONF_TWT_QUEUE_DEPTH): cv.int_range(min=1, max=255),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_subscription_mode,
     _validate_transport,
+    _validate_twt,
 )
 
 
@@ -240,6 +252,10 @@ async def to_code(config):
             config[CONF_ON_CLIENT_DISCONNECTED],
         )
     cg.add_define("USE_COAP_SERVER_PORT", config[CONF_PORT])
+    if "wifi_twt" in CORE.loaded_integrations:
+        cg.add_define(
+            "USE_COAP_SERVER_TWT_QUEUE_DEPTH", config.get(CONF_TWT_QUEUE_DEPTH, 8)
+        )
     cg.add(var.set_subscription_confirm(config[CONF_SUBSCRIPTION_CONFIRM]))
     cg.add(var.set_observe_retry(config[CONF_OBSERVE_RETRY]))
 

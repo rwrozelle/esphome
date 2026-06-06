@@ -1,5 +1,8 @@
 #pragma once
 #include "esphome/core/defines.h"
+#ifdef USE_WIFI_TWT
+#include "esphome/components/wifi_twt/wifi_twt.h"
+#endif
 #include "esphome/core/component.h"
 #include "esphome/core/controller.h"
 #include "esphome/core/entity_base.h"
@@ -579,6 +582,16 @@ class CoapServerNet : public CoapServer {
   int sock_{-1};
   uint16_t next_msg_id_{static_cast<uint16_t>(random_uint32())};
   FixedVector<NetCoapResource> resources_;
+#ifdef USE_WIFI_TWT
+  struct TwtQueueEntry {
+    uint8_t data[1280];
+    uint16_t len;
+    sockaddr_in6 peer;
+  };
+  StaticRingBuffer<TwtQueueEntry, USE_COAP_SERVER_TWT_QUEUE_DEPTH> twt_queue_{};
+  bool twt_queuing_enabled_{false};
+  void flush_twt_queue_();
+#endif
   std::array<NetCoapClient, USE_COAP_SERVER_MAX_CLIENTS> active_clients_{};
   NetCoapObserver *active_observers_{nullptr};
   NetCoapObserver *free_observers_{nullptr};

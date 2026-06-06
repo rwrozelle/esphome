@@ -7,6 +7,10 @@
 
 namespace esphome::wifi_twt {
 
+WiFiTWT *global_wifi_twt_component = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+WiFiTWT::WiFiTWT() { global_wifi_twt_component = this; }
+
 static const char *const TAG = "wifi_twt";
 
 void WiFiTWT::dump_config() {

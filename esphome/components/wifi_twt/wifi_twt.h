@@ -13,6 +13,7 @@ namespace esphome::wifi_twt {
 
 class WiFiTWT : public Component, public wifi::WiFiIPStateListener, public wifi::WiFiConnectStateListener {
  public:
+  WiFiTWT();
   void setup() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
@@ -64,6 +65,8 @@ class WiFiTWT : public Component, public wifi::WiFiIPStateListener, public wifi:
   LazyCallbackManager<void()> stop_callback_;
   LazyCallbackManager<void()> wakeup_callback_;
 };
+
+extern WiFiTWT *global_wifi_twt_component;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 }  // namespace esphome::wifi_twt
 

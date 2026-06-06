@@ -11,11 +11,11 @@ namespace esphome::coap_server {
 
 // RFC 8949 §3: error conditions
 enum CborError {
-  CborNoError = 0,
-  CborErrorUnknownType,
-  CborErrorUnexpectedEOF,
-  CborErrorIllegalType,
-  CborErrorOutOfMemory,
+  CBOR_NO_ERROR = 0,
+  CBOR_ERROR_UNKNOWN_TYPE,
+  CBOR_ERROR_UNEXPECTED_EOF,
+  CBOR_ERROR_ILLEGAL_TYPE,
+  CBOR_ERROR_OUT_OF_MEMORY,
 };
 
 // ---------------------------------------------------------------------------
@@ -28,26 +28,26 @@ struct CborEncoder {
 };
 
 // Write the RFC 8949 §3 initial byte + argument for major type mt and value v.
-static inline CborError cbor_write_head_(uint8_t mt, uint64_t v, CborEncoder *enc) {
+static inline CborError cbor_write_head(uint8_t mt, uint64_t v, CborEncoder *enc) {
   uint8_t b = (uint8_t) (mt << 5);
   if (v <= 23) {
     if (enc->ptr >= enc->end)
-      return CborErrorOutOfMemory;
+      return CBOR_ERROR_OUT_OF_MEMORY;
     *enc->ptr++ = b | (uint8_t) v;
   } else if (v <= 0xFFu) {
     if (enc->ptr + 2 > enc->end)
-      return CborErrorOutOfMemory;
+      return CBOR_ERROR_OUT_OF_MEMORY;
     *enc->ptr++ = b | 24;
     *enc->ptr++ = (uint8_t) v;
   } else if (v <= 0xFFFFu) {
     if (enc->ptr + 3 > enc->end)
-      return CborErrorOutOfMemory;
+      return CBOR_ERROR_OUT_OF_MEMORY;
     *enc->ptr++ = b | 25;
     *enc->ptr++ = (uint8_t) (v >> 8);
     *enc->ptr++ = (uint8_t) v;
   } else if (v <= 0xFFFFFFFFu) {
     if (enc->ptr + 5 > enc->end)
-      return CborErrorOutOfMemory;
+      return CBOR_ERROR_OUT_OF_MEMORY;
     *enc->ptr++ = b | 26;
     *enc->ptr++ = (uint8_t) (v >> 24);
     *enc->ptr++ = (uint8_t) (v >> 16);
@@ -55,7 +55,7 @@ static inline CborError cbor_write_head_(uint8_t mt, uint64_t v, CborEncoder *en
     *enc->ptr++ = (uint8_t) v;
   } else {
     if (enc->ptr + 9 > enc->end)
-      return CborErrorOutOfMemory;
+      return CBOR_ERROR_OUT_OF_MEMORY;
     *enc->ptr++ = b | 27;
     *enc->ptr++ = (uint8_t) (v >> 56);
     *enc->ptr++ = (uint8_t) (v >> 48);
@@ -66,7 +66,7 @@ static inline CborError cbor_write_head_(uint8_t mt, uint64_t v, CborEncoder *en
     *enc->ptr++ = (uint8_t) (v >> 8);
     *enc->ptr++ = (uint8_t) v;
   }
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 
 static inline void cbor_encoder_init(CborEncoder *enc, uint8_t *buf, size_t size, int flags) {
@@ -76,35 +76,35 @@ static inline void cbor_encoder_init(CborEncoder *enc, uint8_t *buf, size_t size
 }
 
 // RFC 8949 §3.1 major type 0: unsigned integer
-static inline CborError cbor_encode_uint(CborEncoder *enc, uint64_t v) { return cbor_write_head_(0, v, enc); }
+static inline CborError cbor_encode_uint(CborEncoder *enc, uint64_t v) { return cbor_write_head(0, v, enc); }
 
 // RFC 8949 §3.1 major types 0/1: non-negative uses type 0, negative uses type 1 (n = -1 - value)
 static inline CborError cbor_encode_int(CborEncoder *enc, int64_t v) {
   if (v >= 0)
-    return cbor_write_head_(0, (uint64_t) v, enc);
-  return cbor_write_head_(1, (uint64_t) (-1 - v), enc);
+    return cbor_write_head(0, (uint64_t) v, enc);
+  return cbor_write_head(1, (uint64_t) (-1 - v), enc);
 }
 
 // RFC 8949 §3.3 major type 7: false=0xF4, true=0xF5
 static inline CborError cbor_encode_boolean(CborEncoder *enc, bool v) {
   if (enc->ptr >= enc->end)
-    return CborErrorOutOfMemory;
+    return CBOR_ERROR_OUT_OF_MEMORY;
   *enc->ptr++ = v ? 0xF5 : 0xF4;
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 
 // RFC 8949 §3.3 major type 7, additional 22: null (0xF6)
 static inline CborError cbor_encode_null(CborEncoder *enc) {
   if (enc->ptr >= enc->end)
-    return CborErrorOutOfMemory;
+    return CBOR_ERROR_OUT_OF_MEMORY;
   *enc->ptr++ = 0xF6;
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 
 // RFC 8949 §3.3 major type 7, additional 26: IEEE 754 single-precision float (0xFA + 4 bytes)
 static inline CborError cbor_encode_float(CborEncoder *enc, float v) {
   if (enc->ptr + 5 > enc->end)
-    return CborErrorOutOfMemory;
+    return CBOR_ERROR_OUT_OF_MEMORY;
   uint32_t bits;
   memcpy(&bits, &v, 4);
   *enc->ptr++ = 0xFA;
@@ -112,31 +112,31 @@ static inline CborError cbor_encode_float(CborEncoder *enc, float v) {
   *enc->ptr++ = (uint8_t) (bits >> 16);
   *enc->ptr++ = (uint8_t) (bits >> 8);
   *enc->ptr++ = (uint8_t) bits;
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 
 // RFC 8949 §3.1 major type 2: byte string
 static inline CborError cbor_encode_byte_string(CborEncoder *enc, const uint8_t *data, size_t len) {
-  CborError err = cbor_write_head_(2, (uint64_t) len, enc);
-  if (err != CborNoError)
+  CborError err = cbor_write_head(2, (uint64_t) len, enc);
+  if (err != CBOR_NO_ERROR)
     return err;
   if (enc->ptr + len > enc->end)
-    return CborErrorOutOfMemory;
+    return CBOR_ERROR_OUT_OF_MEMORY;
   memcpy(enc->ptr, data, len);
   enc->ptr += len;
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 
 // RFC 8949 §3.1 major type 3: text string
 static inline CborError cbor_encode_text_string(CborEncoder *enc, const char *str, size_t len) {
-  CborError err = cbor_write_head_(3, (uint64_t) len, enc);
-  if (err != CborNoError)
+  CborError err = cbor_write_head(3, (uint64_t) len, enc);
+  if (err != CBOR_NO_ERROR)
     return err;
   if (enc->ptr + len > enc->end)
-    return CborErrorOutOfMemory;
+    return CBOR_ERROR_OUT_OF_MEMORY;
   memcpy(enc->ptr, str, len);
   enc->ptr += len;
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 
 static inline CborError cbor_encode_text_stringz(CborEncoder *enc, const char *str) {
@@ -145,28 +145,28 @@ static inline CborError cbor_encode_text_stringz(CborEncoder *enc, const char *s
 
 // RFC 8949 §3.1 major type 5: map; count = number of key-value pairs
 static inline CborError cbor_encoder_create_map(CborEncoder *enc, CborEncoder *child, size_t count) {
-  CborError err = cbor_write_head_(5, (uint64_t) count, enc);
-  if (err != CborNoError)
+  CborError err = cbor_write_head(5, (uint64_t) count, enc);
+  if (err != CBOR_NO_ERROR)
     return err;
   child->ptr = enc->ptr;
   child->end = enc->end;
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 
 // RFC 8949 §3.1 major type 4: array
 static inline CborError cbor_encoder_create_array(CborEncoder *enc, CborEncoder *child, size_t count) {
-  CborError err = cbor_write_head_(4, (uint64_t) count, enc);
-  if (err != CborNoError)
+  CborError err = cbor_write_head(4, (uint64_t) count, enc);
+  if (err != CBOR_NO_ERROR)
     return err;
   child->ptr = enc->ptr;
   child->end = enc->end;
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 
 // Propagate child's write position back to parent.
 static inline CborError cbor_encoder_close_container(CborEncoder *enc, const CborEncoder *child) {
   enc->ptr = child->ptr;
-  return CborNoError;
+  return CBOR_NO_ERROR;
 }
 
 static inline size_t cbor_encoder_get_buffer_size(const CborEncoder *enc, const uint8_t *buf) {
