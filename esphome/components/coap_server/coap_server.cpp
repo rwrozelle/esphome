@@ -906,7 +906,7 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
       }
       char ad_buf[8];
       size_t ad_len = (size_t) snprintf(ad_buf, sizeof(ad_buf), ";ad=%d",
-                                        static_cast<const sensor::Sensor *>(res.entity)->get_accuracy_decimals());
+                                        static_cast<sensor::Sensor *>(res.entity)->get_accuracy_decimals());
       put(ad_buf, ad_len);
     }
     if (res.type == ENTITYTYPE_SENSOR || res.type == ENTITYTYPE_TEXT_SENSOR || res.type == ENTITYTYPE_NUMBER) {
