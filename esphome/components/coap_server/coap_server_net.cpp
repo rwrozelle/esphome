@@ -345,7 +345,7 @@ void CoapServerNet::process_datagram_(const uint8_t *buf, size_t len, const sock
     ESP_LOGW(TAG, "CoAP Net: malformed packet, dropping");
     return;
   }
-  ESP_LOGD(TAG, "CoAP Net: rx type=%u code=0x%02x path=%s len=%u", pkt.type, pkt.code, pkt.uri_path, (unsigned) len);
+  ESP_LOGV(TAG, "CoAP Net: rx type=%u code=0x%02x path=%s len=%u", pkt.type, pkt.code, pkt.uri_path, (unsigned) len);
 
   if (pkt.type == 2 || pkt.type == 3) {  // ACK or RST — response to a CON notification we sent
     handle_con_response_(pkt, *peer);
@@ -413,7 +413,7 @@ void CoapServerNet::send_response(const uint8_t *buf, size_t len, const sockaddr
 #endif
   if (this->sock_ < 0)
     return;
-  ESP_LOGD(TAG, "CoAP Net: tx code=0x%02x len=%u", len > 1 ? buf[1] : 0u, (unsigned) len);
+  ESP_LOGV(TAG, "CoAP Net: tx code=0x%02x len=%u", len > 1 ? buf[1] : 0u, (unsigned) len);
   ssize_t sent = sendto(this->sock_, buf, len, 0, (const struct sockaddr *) peer, sizeof(*peer));
   if (sent < 0) {
     ESP_LOGW(TAG, "CoAP Net: sendto failed errno=%d", errno);
@@ -431,7 +431,7 @@ void CoapServerNet::flush_twt_queue_() {
     TwtQueueEntry entry = this->twt_queue_.front();
     this->twt_queue_.pop();
     if (this->sock_ >= 0) {
-      ESP_LOGD(TAG, "CoAP Net: TWT flush tx code=0x%02x len=%u", entry.len > 1 ? entry.data[1] : 0u,
+      ESP_LOGV(TAG, "CoAP Net: TWT flush tx code=0x%02x len=%u", entry.len > 1 ? entry.data[1] : 0u,
                (unsigned) entry.len);
       ssize_t sent =
           sendto(this->sock_, entry.data, entry.len, 0, (const struct sockaddr *) &entry.peer, sizeof(entry.peer));
