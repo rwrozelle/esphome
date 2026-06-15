@@ -209,34 +209,37 @@ void CoapServerOT::dump_config() {
 
 // static handler
 void CoapServerOT::handle_well_known_core(void *context, otMessage *message, const otMessageInfo *message_info) {
-  otError error = OT_ERROR_NONE;
-  otMessage *response = nullptr;
+  if (otCoapMessageGetCode(message) != OT_COAP_CODE_GET)
+    return;
+
   ehCoapResource *resource = static_cast<ehCoapResource *>(context);
   CoapServerOT *self = resource->server;
   otInstance *instance = self->instance_;
 
-  // Only respond to GET requests
-  if (otCoapMessageGetCode(message) != OT_COAP_CODE_GET) {
-    return;
-  }
+  // Point wk_source_ at the cached link-format buffer each call (idempotent since
+  // link_format_buf_ is read-only after setup()).  OT holds &wk_source_ as ctx across
+  // all block requests, so the struct must outlive the handler — storing it as a member
+  // of CoapServerOT satisfies that requirement.
+  self->wk_source_.data = self->link_format_buf_.get();
+  self->wk_source_.data_len = self->link_format_size_;
+  self->wk_source_.content_format = OT_COAP_OPTION_CONTENT_FORMAT_LINK_FORMAT;
+  self->wk_source_.read_fn = nullptr;
 
-  response = otCoapNewMessage(instance, nullptr);
-  if (response == nullptr) {
+  otError error = OT_ERROR_NONE;
+  otMessage *response = otCoapNewMessage(instance, nullptr);
+  if (response == nullptr)
     return;
-  }
+
   SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
-  SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_LINK_FORMAT));
-  SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-
-  SuccessOrExit(error = otMessageAppend(response, self->link_format_buf_.get(), (uint16_t) self->link_format_size_));
-
-  SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+  SuccessOrExit(error = otCoapMessageAppendContentFormatOption(
+                    response, static_cast<otCoapOptionContentFormat>(self->wk_source_.content_format)));
+  SuccessOrExit(error = otCoapSendResponseBlockWise(instance, response, message_info, &self->wk_source_,
+                                                    &CoapServer::blockwise_transmit_hook));
 exit:
   if (error != OT_ERROR_NONE) {
     ESP_LOGE(TAG, "coap send response error %d: %s", error, otThreadErrorToString(error));
-    if (response != nullptr) {
+    if (response != nullptr)
       otMessageFree(response);
-    }
   }
 }  // handle_well_known_core
 

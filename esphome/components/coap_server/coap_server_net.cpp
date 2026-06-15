@@ -265,6 +265,9 @@ bool CoapServerNet::parse_coap(const uint8_t *buf, size_t len, CoapPacket *pkt) 
   pkt->observe = 3;
   pkt->observe_present = false;
   pkt->oscore_opt_len = 0;
+  pkt->block2_present = false;
+  pkt->block2_num = 0;
+  pkt->block2_szx = 6;
   pkt->payload = nullptr;
   pkt->payload_len = 0;
 
@@ -325,6 +328,15 @@ bool CoapServerNet::parse_coap(const uint8_t *buf, size_t len, CoapPacket *pkt) 
         size_t copy = std::min((size_t) opt_len, (size_t) (path_end - path_ptr));
         memcpy(path_ptr, oval, copy);
         path_ptr += copy;
+        break;
+      }
+      case 23: {  // Block2 (RFC 7959)
+        pkt->block2_present = true;
+        uint32_t val = 0;
+        for (uint16_t i = 0; i < opt_len && i < 3; i++)
+          val = (val << 8) | oval[i];
+        pkt->block2_szx = (uint8_t) (val & 0x07);
+        pkt->block2_num = val >> 4;  // skip M bit (val >> 3) & 1
         break;
       }
       default:
@@ -450,11 +462,40 @@ void CoapServerNet::flush_twt_queue_() {
 void CoapServerNet::handle_well_known_core_(const CoapPacket &pkt, const sockaddr_in6 &peer) {
   if (pkt.code != 0x01)
     return;
+
+  // Block size negotiation (RFC 7959 §2.3).
+  // Client SZX is capped at 6 (1024 bytes) to stay within builder_.buf budget.
+  uint8_t szx = pkt.block2_present ? std::min(pkt.block2_szx, (uint8_t) 6) : 6;
+  uint16_t block_size = (uint16_t) (16u << szx);
+
+  // Pre-check before multiplying to avoid uint32_t overflow on large block2_num.
+  if ((size_t) pkt.block2_num > this->link_format_size_ / block_size) {
+    this->builder_.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
+    send_response(this->builder_.buf, this->builder_.pos, &peer);
+    return;
+  }
+  uint32_t offset = pkt.block2_num * (uint32_t) block_size;
+
+  if (offset >= this->link_format_size_) {
+    this->builder_.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
+    send_response(this->builder_.buf, this->builder_.pos, &peer);
+    return;
+  }
+
+  // Slice directly from the heap-allocated link_format_buf_ — no intermediate copy.
+  size_t avail = this->link_format_size_ - offset;
+  uint16_t len = (uint16_t) std::min((size_t) block_size, avail);
+  bool more = (offset + len) < this->link_format_size_;
+
+  // Block2 option value: (NUM << 4) | (M << 3) | SZX
+  uint32_t block2_val = (pkt.block2_num << 4) | (more ? 0x08u : 0x00u) | szx;
+
   this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
   uint8_t cf = 40;  // link-format
   this->builder_.option(12, &cf, 1);
+  this->builder_.option_uint(23, block2_val);
   this->builder_.payload_marker();
-  this->builder_.append(this->link_format_buf_.get(), this->link_format_size_);
+  this->builder_.append(this->link_format_buf_.get() + offset, len);
   send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 

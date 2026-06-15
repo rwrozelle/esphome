@@ -22,6 +22,11 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+// Minimal otError shim so BlockwiseSource / blockwise_transmit_hook compile
+// in the Net transport path without pulling in the full OpenThread headers.
+typedef int otError;
+static constexpr otError OT_ERROR_NONE = 0;
+static constexpr otError OT_ERROR_INVALID_ARGS = 7;
 #endif  // !USE_OPENTHREAD
 
 #ifdef USE_COAP_OSCORE
@@ -203,6 +208,23 @@ class CoapServer : public Component, public Controller {
   };
 #endif  // USE_COAP_OSCORE
 
+  // Generic block-wise data source for Block2 GET responses (RFC 7959).
+  // Set read_fn to serve streaming data (e.g. OTA firmware); leave nullptr
+  // to serve the in-memory data/data_len buffer directly.
+  struct BlockwiseSource {
+    const uint8_t *data{nullptr};
+    size_t data_len{0};
+    uint16_t content_format{40};
+    otError (*read_fn)(void *ctx, uint8_t *buf, uint32_t pos, uint16_t *len, bool *more){nullptr};
+    void *read_ctx{nullptr};
+  };
+
+  // OT-compatible transmit hook: fills block_buf from src at position,
+  // updates *block_length to bytes written, sets *more. Used directly by
+  // otCoapSendResponseBlockWise and by the Net transport's manual Block2 logic.
+  static otError blockwise_transmit_hook(void *ctx, uint8_t *block_buf, uint32_t position, uint16_t *block_length,
+                                         bool *more);
+
  protected:
   // Pure virtual — each transport subclass implements entity-state notification
   virtual void on_entity_update(EntityBase *entity) = 0;
@@ -222,11 +244,8 @@ class CoapServer : public Component, public Controller {
 
   // Builds the .well-known/core link-format payload into buf (up to buf_len bytes) and returns
   // the true total size. When buf is nullptr the write is skipped but the true size is still
-  // returned, allowing a two-pass size-check + allocate pattern. setup() builds into a stack
-  // buffer, rejects configs that exceed LINK_FORMAT_MAX_SIZE, then caches the result in
-  // link_format_buf_ / link_format_size_ for both transport handlers to serve directly.
+  // returned, allowing a two-pass allocate + fill pattern.
   static size_t build_link_format(uint8_t *buf, size_t buf_len);
-  static constexpr size_t LINK_FORMAT_MAX_SIZE = 1100;
 
   std::unique_ptr<uint8_t[]> link_format_buf_;
   size_t link_format_size_{0};
@@ -382,6 +401,10 @@ class CoapServerOT : public CoapServer {
   // Careful: use only inside CoAP callbacks (OpenThread task context)
   otInstance *instance_;
 
+  // Block-wise source for .well-known/core responses; refreshed each handler call.
+  // Lives as a member so the ctx pointer given to OT remains valid across block requests.
+  BlockwiseSource wk_source_;
+
   ehCoapResource ping_resource_;
   esphome::FixedVector<ehCoapResource> resources_;
   std::array<ehCoapClient, USE_COAP_SERVER_MAX_CLIENTS> active_clients_{};
@@ -527,6 +550,10 @@ class CoapServerNet : public CoapServer {
     const uint8_t *payload{nullptr};
     uint16_t payload_len{0};
     char uri_path[64]{};
+    // RFC 7959 Block2 option (23) — for block-wise GET responses
+    bool block2_present{false};
+    uint32_t block2_num{0};  // block number requested by client
+    uint8_t block2_szx{6};   // size exponent: block_size = 16 << szx (default 1024)
   };
 
   static bool parse_coap(const uint8_t *buf, size_t len, CoapPacket *pkt);

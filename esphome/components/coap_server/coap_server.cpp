@@ -38,18 +38,9 @@ void CoapServer::setup() {
 #endif  // USE_COAP_OSCORE
 
   {
-    uint8_t tmp[LINK_FORMAT_MAX_SIZE];
-    size_t size = build_link_format(tmp, sizeof(tmp));
-    if (size > LINK_FORMAT_MAX_SIZE) {
-      ESP_LOGE(TAG,
-               "CoAP .well-known/core payload (%u B) exceeds safe UDP limit (%u B). "
-               "Reduce entity count. Long-term fix: block-wise transfer (RFC 7959).",
-               (unsigned) size, (unsigned) LINK_FORMAT_MAX_SIZE);
-      this->mark_failed();
-      return;
-    }
+    size_t size = build_link_format(nullptr, 0);
     this->link_format_buf_ = std::make_unique<uint8_t[]>(size);
-    memcpy(this->link_format_buf_.get(), tmp, size);
+    build_link_format(this->link_format_buf_.get(), size);
     this->link_format_size_ = size;
   }
 }
@@ -75,6 +66,22 @@ void CoapServer::on_text_sensor_update(text_sensor::TextSensor *entity) { this->
 #ifdef USE_VALVE
 void CoapServer::on_valve_update(valve::Valve *entity) { this->on_entity_update(entity); }
 #endif
+
+// static
+otError CoapServer::blockwise_transmit_hook(void *ctx, uint8_t *block_buf, uint32_t position, uint16_t *block_length,
+                                            bool *more) {
+  auto *src = static_cast<BlockwiseSource *>(ctx);
+  if (src->read_fn != nullptr)
+    return src->read_fn(src->read_ctx, block_buf, position, block_length, more);
+  if (position >= src->data_len)
+    return OT_ERROR_INVALID_ARGS;
+  size_t avail = src->data_len - position;
+  uint16_t len = (uint16_t) std::min((size_t) *block_length, avail);
+  memcpy(block_buf, src->data + position, len);
+  *block_length = len;
+  *more = (position + len) < src->data_len;
+  return OT_ERROR_NONE;
+}
 
 // static
 size_t CoapServer::build_link_format(uint8_t *buf, size_t buf_len) {
