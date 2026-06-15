@@ -320,6 +320,7 @@ def _build_additional_config_file(config, full_config):
 
         if full_config.get("coap_server") or full_config.get("coap_client"):
             f.write("#define OPENTHREAD_CONFIG_COAP_OBSERVE_API_ENABLE 1\n")
+            f.write("#define OPENTHREAD_CONFIG_COAP_BLOCKWISE_TRANSFER_ENABLE 1\n")
 
         if config.get(CONF_ENABLE_WAKEUP_COORDINATION):
             device_type = config.get(CONF_DEVICE_TYPE)
