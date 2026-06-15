@@ -207,8 +207,8 @@ bool CoapServerNet::teardown() {
 }
 
 void CoapServerNet::dump_config() {
-  ESP_LOGCONFIG(TAG, "CoAP Net Server:\n  Listen Port: %d\n  Resources: %" PRIu32, USE_COAP_SERVER_PORT,
-                (uint32_t) (this->resources_.size() - 2));
+  ESP_LOGCONFIG(TAG, "CoAP Net Server:\n  Listen Port: %d\n  Resources: %" PRIu32 "\n  Link-format: %u bytes",
+                USE_COAP_SERVER_PORT, (uint32_t) (this->resources_.size() - 2), (unsigned) this->link_format_size_);
   if (!this->subscription_confirm_) {
     ESP_LOGCONFIG(TAG,
                   "  Server Ping: interval=%" PRIu32 "s timeout=%" PRIu32 "s\n"
@@ -493,6 +493,8 @@ void CoapServerNet::handle_well_known_core_(const CoapPacket &pkt, const sockadd
   this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
   uint8_t cf = 40;  // link-format
   this->builder_.option(12, &cf, 1);
+  ESP_LOGD(TAG, ".well-known/core block %" PRIu32 " offset=%u len=%u more=%d total=%u", (uint32_t) pkt.block2_num,
+           (unsigned) offset, (unsigned) len, (int) more, (unsigned) this->link_format_size_);
   this->builder_.option_uint(23, block2_val);
   this->builder_.payload_marker();
   this->builder_.append(this->link_format_buf_.get() + offset, len);
@@ -620,8 +622,11 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
         }
         // Deregister stale observer from same client
         NetCoapObserver *stale = get_observer_(pkt.token, pkt.token_len, peer);
-        if (stale != nullptr)
+        if (stale != nullptr) {
+          ESP_LOGD(TAG, "Replace stale observer from restarted client");
           free_observer_(stale);
+        }
+        ESP_LOGD(TAG, "Create Observer: /%s", resource->path);
         observer = new_observer_(resource, peer, pkt.token, pkt.token_len, is_con);
 #ifdef USE_COAP_OSCORE
         if (observer != nullptr && oscore_protected) {
@@ -635,8 +640,10 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
           new_client_(peer);
       } else if (pkt.observe == 1) {
         NetCoapObserver *obs = get_observer_(pkt.token, pkt.token_len, peer);
-        if (obs != nullptr)
+        if (obs != nullptr) {
+          ESP_LOGD(TAG, "Cancel Observer: /%s", resource->path);
           free_observer_(obs);
+        }
       }
     }
 
@@ -796,6 +803,7 @@ void CoapServerNet::on_entity_update(EntityBase *entity) {
   }
   if (resource == nullptr)
     return;
+  ESP_LOGV(TAG, "On Update: /%s", resource->path);
   size_t payload_len = cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), resource->entity, resource->type);
   if (payload_len == 0)
     return;
@@ -806,6 +814,7 @@ void CoapServerNet::notify_observers_(NetCoapResource *resource, const uint8_t *
   for (NetCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
     if (obs->resource != resource)
       continue;
+    ESP_LOGV(TAG, "Found Observer: /%s", resource->path);
     // Mirror OT: send CON on 1st notification and every 5th after; NON in between.
     bool send_con = obs->is_con && (obs->notify_count == 0 || obs->notify_count == 5);
     if (send_con && obs->con_pending)

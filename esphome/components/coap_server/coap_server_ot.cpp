@@ -188,8 +188,8 @@ bool CoapServerOT::teardown() {
 }  // teardown()
 
 void CoapServerOT::dump_config() {
-  ESP_LOGCONFIG(TAG, "CoAP Server:\n  Listen Port: %d\n  Resources: %" PRIu32, USE_COAP_SERVER_PORT,
-                (uint32_t) (this->resources_.size() - 1));
+  ESP_LOGCONFIG(TAG, "CoAP Server:\n  Listen Port: %d\n  Resources: %" PRIu32 "\n  Link-format: %u bytes",
+                USE_COAP_SERVER_PORT, (uint32_t) (this->resources_.size() - 1), (unsigned) this->link_format_size_);
   if (!this->subscription_confirm_) {
     ESP_LOGCONFIG(TAG,
                   "  Server Ping: interval=%" PRIu32 "s timeout=%" PRIu32 "s\n"
@@ -394,13 +394,13 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
             for (ehCoapObserver *stale = this->active_observers_; stale != nullptr; stale = stale->next) {
               if (stale->resource == resource &&
                   otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
-                ESP_LOGD(TAG, "Replace stale observer from restarted client");
+                ESP_LOGD(TAG, "Replace stale observer from restarted client: /%s", resource->path);
                 this->free_observer_(stale);
                 break;
               }
             }
           }
-          ESP_LOGD(TAG, "Create Observer");
+          ESP_LOGD(TAG, "Create Observer: /%s", resource->path);
           otCoapToken token;
           SuccessOrExit(error = otCoapMessageReadToken(message, &token));
           obs = this->new_observer_(resource, *message_info, token, otCoapMessageGetType(message));
@@ -420,7 +420,7 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
           if (!client_known)
             this->new_client_(*message_info);
         } else if (observe == 1 && observer != nullptr) {
-          ESP_LOGD(TAG, "Cancel Observer");
+          ESP_LOGD(TAG, "Cancel Observer: /%s", resource->path);
           std::lock_guard<std::mutex> lock(this->lock_);
           this->free_observer_(observer);
         }
@@ -714,9 +714,13 @@ void CoapServerOT::shrink_observers() {
 }
 
 void CoapServerOT::republish_all() {
+  uint32_t delay_ms = 0;
   for (auto &res : this->resources_) {
-    if (res.observable && res.entity != nullptr)
-      this->on_entity_update(res.entity);
+    if (res.observable && res.entity != nullptr) {
+      EntityBase *entity = res.entity;
+      this->set_timeout(delay_ms, [this, entity]() { this->on_entity_update(entity); });
+      delay_ms += 50;
+    }
   }
 }
 
@@ -1157,7 +1161,7 @@ void CoapServerOT::notify_observers_(ehCoapResource *resource, const uint8_t *pa
     std::lock_guard<std::mutex> lock(this->lock_);
     for (ehCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
       if (obs->resource == resource) {
-        ESP_LOGV(TAG, "Found Observer");
+        ESP_LOGV(TAG, "Found Observer: /%s", resource->path);
         if (pending_count < USE_COAP_SERVER_MAX_CLIENTS) {
           pending[pending_count++] = {obs, obs->resource};
         } else {
@@ -1173,7 +1177,6 @@ void CoapServerOT::notify_observers_(ehCoapResource *resource, const uint8_t *pa
 void CoapServerOT::on_entity_update(EntityBase *entity) {
   if (entity->is_internal())
     return;
-  ESP_LOGV(TAG, "On Update");
   ehCoapResource *resource = nullptr;
   for (size_t i = 0; i < this->resources_.size(); i++) {
     if (this->resources_[i].entity == entity && this->resources_[i].observable) {
@@ -1183,6 +1186,7 @@ void CoapServerOT::on_entity_update(EntityBase *entity) {
   }
   if (resource == nullptr)
     return;
+  ESP_LOGV(TAG, "On Update: /%s", resource->path);
   uint8_t payload_buffer[COAP_PAYLOAD_MAX_SIZE];
   size_t payload_len = cbor_output_(payload_buffer, COAP_PAYLOAD_MAX_SIZE, resource->entity, resource->type);
   if (payload_len == 0) {
