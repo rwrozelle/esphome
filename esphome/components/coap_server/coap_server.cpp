@@ -767,7 +767,7 @@ size_t CoapServer::build_ping_payload(uint8_t *buf, bool boot_signal) {
 }
 
 size_t CoapServer::count_resources() {
-  size_t n = 2;  // .well-known/core + info
+  size_t n = 1;  // info only (.well-known/core uses wk_bw_resource_, not resources_)
 #ifdef USE_BINARY_SENSOR
   for (auto *e : App.get_binary_sensors()) {
     if (!e->is_internal()) {

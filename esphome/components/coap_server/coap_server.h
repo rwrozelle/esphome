@@ -405,6 +405,13 @@ class CoapServerOT : public CoapServer {
   // Lives as a member so the ctx pointer given to OT remains valid across block requests.
   BlockwiseSource wk_source_;
 
+  // Transmit-hook wrapper for blocks 1+: receives CoapServerOT* ctx, delegates to
+  // CoapServer::blockwise_transmit_hook(&self->wk_source_, ...).
+  static otError wk_blockwise_transmit_hook(void *ctx, uint8_t *block, uint32_t pos, uint16_t *len, bool *more);
+
+  // Block-wise resource registration for .well-known/core (otCoapAddBlockWiseResource).
+  otCoapBlockwiseResource wk_bw_resource_{};
+
   ehCoapResource ping_resource_;
   esphome::FixedVector<ehCoapResource> resources_;
   std::array<ehCoapClient, USE_COAP_SERVER_MAX_CLIENTS> active_clients_{};
