@@ -3,12 +3,6 @@
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "cbor.h"
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <cerrno>
 #ifdef USE_COAP_OSCORE
 #include "nvs.h"
 #include <psa/crypto.h>
@@ -45,30 +39,6 @@ void CoapServerNet::setup() {
   if (this->is_failed())
     return;
 
-  this->sock_ = socket(AF_INET6, SOCK_DGRAM, 0);
-  if (this->sock_ < 0) {
-    ESP_LOGE(TAG, "CoAP Net: socket() failed: %d", errno);
-    this->mark_failed();
-    return;
-  }
-
-  int yes = 1;
-  setsockopt(this->sock_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-
-  sockaddr_in6 bind_addr{};
-  bind_addr.sin6_family = AF_INET6;
-  bind_addr.sin6_port = htons(USE_COAP_SERVER_PORT);
-  bind_addr.sin6_addr = in6addr_any;
-  if (bind(this->sock_, (struct sockaddr *) &bind_addr, sizeof(bind_addr)) < 0) {
-    ESP_LOGE(TAG, "CoAP Net: bind() failed: %d", errno);
-    close(this->sock_);
-    this->sock_ = -1;
-    this->mark_failed();
-    return;
-  }
-
-  fcntl(this->sock_, F_SETFL, fcntl(this->sock_, F_GETFL, 0) | O_NONBLOCK);
-  ESP_LOGI(TAG, "CoAP Net server started on port %u", USE_COAP_SERVER_PORT);
 #ifdef USE_WIFI_TWT
   if (wifi_twt::global_wifi_twt_component != nullptr) {
     wifi_twt::global_wifi_twt_component->add_on_start_callback([this]() { this->twt_queuing_enabled_ = true; });
@@ -85,13 +55,26 @@ void CoapServerNet::setup() {
 
   this->resources_.init(CoapServer::count_resources());
 
-  // .well-known/core
-  this->resources_.push_back(NetCoapResource());
-  {
-    auto &r = this->resources_[this->resources_.size() - 1];
-    strncpy(r.path, ".well-known/core", sizeof(r.path));
-    r.oscore_exempt = true;
+  this->sock_ = socket::socket_loop_monitored(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+  if (!this->sock_) {
+    ESP_LOGE(TAG, "CoAP Net: socket() failed");
+    this->mark_failed();
+    return;
   }
+  int yes = 1;
+  this->sock_->setsockopt(SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+  sockaddr_in6 bind_addr{};
+  bind_addr.sin6_family = AF_INET6;
+  bind_addr.sin6_port = htons(USE_COAP_SERVER_PORT);
+  bind_addr.sin6_addr = in6addr_any;
+  if (this->sock_->bind((sockaddr *) &bind_addr, sizeof(bind_addr)) < 0) {
+    ESP_LOGE(TAG, "CoAP Net: bind() failed");
+    this->sock_.reset();
+    this->mark_failed();
+    return;
+  }
+  this->sock_->setblocking(false);
+  ESP_LOGI(TAG, "CoAP Net server started on port %u", USE_COAP_SERVER_PORT);
 
   // /info
   this->resources_.push_back(NetCoapResource());
@@ -172,13 +155,12 @@ void CoapServerNet::setup() {
 }
 
 void CoapServerNet::loop() {
-  if (this->sock_ < 0)
+  if (!this->sock_ || !this->sock_->ready())
     return;
-  sockaddr_in6 peer{};
-  socklen_t peer_len = sizeof(peer);
+  sockaddr_in6 peer;
+  socklen_t peerlen = sizeof(peer);
   ssize_t n;
-  while ((n = recvfrom(this->sock_, this->recv_buf_, sizeof(this->recv_buf_), 0, (struct sockaddr *) &peer,
-                       &peer_len)) > 0)
+  while ((n = this->sock_->recvfrom(this->recv_buf_, sizeof(this->recv_buf_), (sockaddr *) &peer, &peerlen)) > 0)
     this->process_datagram_(this->recv_buf_, (size_t) n, &peer);
 }
 
@@ -195,9 +177,9 @@ bool CoapServerNet::teardown() {
     obs = next;
   }
   this->free_observers_ = nullptr;
-  if (this->sock_ >= 0) {
-    close(this->sock_);
-    this->sock_ = -1;
+  if (this->sock_) {
+    this->sock_->close();
+    this->sock_.reset();
   }
 #ifdef USE_WIFI_TWT
   this->twt_queuing_enabled_ = false;
@@ -208,7 +190,7 @@ bool CoapServerNet::teardown() {
 
 void CoapServerNet::dump_config() {
   ESP_LOGCONFIG(TAG, "CoAP Net Server:\n  Listen Port: %d\n  Resources: %" PRIu32 "\n  Link-format: %u bytes",
-                USE_COAP_SERVER_PORT, (uint32_t) (this->resources_.size() - 2), (unsigned) this->link_format_size_);
+                USE_COAP_SERVER_PORT, (uint32_t) (this->resources_.size() - 1), (unsigned) this->link_format_size_);
   if (!this->subscription_confirm_) {
     ESP_LOGCONFIG(TAG,
                   "  Server Ping: interval=%" PRIu32 "s timeout=%" PRIu32 "s\n"
@@ -423,15 +405,11 @@ void CoapServerNet::send_response(const uint8_t *buf, size_t len, const sockaddr
     return;
   }
 #endif
-  if (this->sock_ < 0)
+  if (!this->sock_)
     return;
   ESP_LOGV(TAG, "CoAP Net: tx code=0x%02x len=%u", len > 1 ? buf[1] : 0u, (unsigned) len);
-  ssize_t sent = sendto(this->sock_, buf, len, 0, (const struct sockaddr *) peer, sizeof(*peer));
-  if (sent < 0) {
-    ESP_LOGW(TAG, "CoAP Net: sendto failed errno=%d", errno);
-  } else if ((size_t) sent != len) {
-    ESP_LOGW(TAG, "CoAP Net: sendto short write: %d of %u bytes", (int) sent, (unsigned) len);
-  }
+  if (this->sock_->sendto(buf, len, 0, (const sockaddr *) peer, sizeof(*peer)) < 0)
+    ESP_LOGW(TAG, "CoAP Net: sendto failed, dropping tx");
 }
 
 #ifdef USE_WIFI_TWT
@@ -442,14 +420,11 @@ void CoapServerNet::flush_twt_queue_() {
   while (!this->twt_queue_.empty()) {
     TwtQueueEntry entry = this->twt_queue_.front();
     this->twt_queue_.pop();
-    if (this->sock_ >= 0) {
+    if (this->sock_) {
       ESP_LOGV(TAG, "CoAP Net: TWT flush tx code=0x%02x len=%u", entry.len > 1 ? entry.data[1] : 0u,
                (unsigned) entry.len);
-      ssize_t sent =
-          sendto(this->sock_, entry.data, entry.len, 0, (const struct sockaddr *) &entry.peer, sizeof(entry.peer));
-      if (sent < 0) {
-        ESP_LOGW(TAG, "CoAP Net: TWT flush sendto failed errno=%d", errno);
-      }
+      if (this->sock_->sendto(entry.data, entry.len, 0, (const sockaddr *) &entry.peer, sizeof(entry.peer)) < 0)
+        ESP_LOGW(TAG, "CoAP Net: TWT flush sendto failed, dropping");
     }
   }
 }

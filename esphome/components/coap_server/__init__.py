@@ -1,5 +1,6 @@
 from esphome import automation
 import esphome.codegen as cg
+from esphome.components import socket as esphome_socket
 from esphome.components.openthread.const import CONF_DEVICE_TYPE, CONF_POLL_PERIOD
 import esphome.config_validation as cv
 from esphome.const import (
@@ -229,6 +230,9 @@ async def to_code(config):
     cg.add_define("USE_COAP_SERVER")
     # Track controller registration for StaticVector sizing
     CORE.register_controller()
+
+    if not use_ot:
+        esphome_socket.consume_sockets(1, DOMAIN, esphome_socket.SocketType.UDP)(config)
 
     cg.add(var.set_server_ping_interval(config[CONF_SERVER_PING_INTERVAL]))
     cg.add(var.set_server_ping_timeout_ratio(config[CONF_SERVER_PING_TIMEOUT_RATIO]))

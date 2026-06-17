@@ -22,6 +22,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "esphome/components/socket/socket.h"
 // Minimal otError shim so BlockwiseSource / blockwise_transmit_hook compile
 // in the Net transport path without pulling in the full OpenThread headers.
 typedef int otError;
@@ -613,7 +614,7 @@ class CoapServerNet : public CoapServer {
                                  size_t plaintext_buf_len, size_t *plaintext_len, OscoreRequestInfo *req_info);
 #endif
 
-  int sock_{-1};
+  std::unique_ptr<socket::Socket> sock_;
   uint16_t next_msg_id_{static_cast<uint16_t>(random_uint32())};
   FixedVector<NetCoapResource> resources_;
 #ifdef USE_WIFI_TWT
