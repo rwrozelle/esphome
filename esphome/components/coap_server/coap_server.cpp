@@ -895,7 +895,7 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
     put(name.c_str(), name.size());
     put("\";oid=", sizeof("\";oid=") - 1);
     char hash_buf[11];
-    size_t hash_len = (size_t) snprintf(hash_buf, sizeof(hash_buf), "%u", res.entity->get_object_id_hash());
+    size_t hash_len = (size_t) snprintf(hash_buf, sizeof(hash_buf), "%" PRIu32, res.entity->get_object_id_hash());
     put(hash_buf, hash_len);
 #ifdef USE_DEVICES
     if (res.device_index > 0) {

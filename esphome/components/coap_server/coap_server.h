@@ -439,13 +439,13 @@ class CoapServerOT : public CoapServer {
 using NetCoapResource = CoapResourceBase;
 
 struct NetCoapClient : CoapClientBase {
-  sockaddr_in6 peer_addr{};
+  sockaddr_storage peer_addr{};
 };
 
 struct NetCoapObserver : CoapObserverBase {
   NetCoapObserver *next{nullptr};
   NetCoapResource *resource{nullptr};
-  sockaddr_in6 peer_addr{};
+  sockaddr_storage peer_addr{};
   uint8_t token[8]{};
   uint8_t token_len{0};
   bool is_con{false};
@@ -575,37 +575,37 @@ class CoapServerNet : public CoapServer {
  protected:
   void on_entity_update(EntityBase *entity) override;
 
-  void process_datagram_(const uint8_t *buf, size_t len, const sockaddr_in6 *peer);
-  virtual void send_response(const uint8_t *buf, size_t len, const sockaddr_in6 *peer);
+  void process_datagram_(const uint8_t *buf, size_t len, const sockaddr_storage *peer);
+  virtual void send_response(const uint8_t *buf, size_t len, const sockaddr_storage *peer);
 
-  void handle_well_known_core_(const CoapPacket &pkt, const sockaddr_in6 &peer);
-  void handle_info_request_(const CoapPacket &pkt, const sockaddr_in6 &peer);
-  void handle_ping_request_(const CoapPacket &pkt, const sockaddr_in6 &peer);
-  void handle_entity_request_(const CoapPacket &pkt, const sockaddr_in6 &peer, NetCoapResource *resource);
+  void handle_well_known_core_(const CoapPacket &pkt, const sockaddr_storage &peer);
+  void handle_info_request_(const CoapPacket &pkt, const sockaddr_storage &peer);
+  void handle_ping_request_(const CoapPacket &pkt, const sockaddr_storage &peer);
+  void handle_entity_request_(const CoapPacket &pkt, const sockaddr_storage &peer, NetCoapResource *resource);
 #ifdef USE_BUTTON
-  void handle_button_request_(const CoapPacket &pkt, const sockaddr_in6 &peer, NetCoapResource *resource);
+  void handle_button_request_(const CoapPacket &pkt, const sockaddr_storage &peer, NetCoapResource *resource);
 #endif
 #ifdef USE_LOGGER
-  void handle_logs_request_(const CoapPacket &pkt, const sockaddr_in6 &peer);
+  void handle_logs_request_(const CoapPacket &pkt, const sockaddr_storage &peer);
   void flush_logs_();
   void on_log(uint8_t level, const char *tag, const char *message, size_t message_len) override;
   NetCoapResource *logs_resource_{nullptr};
 #endif
 
-  void handle_con_response_(const CoapPacket &pkt, const sockaddr_in6 &peer);
+  void handle_con_response_(const CoapPacket &pkt, const sockaddr_storage &peer);
   void notify_observers_(NetCoapResource *resource, const uint8_t *payload, size_t payload_len);
   void add_net_resource_(EntityType type, EntityBase *entity, bool observable, uint16_t &senml_index);
   NetCoapResource *find_resource_(const char *path);
 
-  NetCoapClient *new_client_(const sockaddr_in6 &peer);
-  NetCoapClient *find_client_(const sockaddr_in6 &peer);
-  void touch_client_(const sockaddr_in6 &peer);
+  NetCoapClient *new_client_(const sockaddr_storage &peer);
+  NetCoapClient *find_client_(const sockaddr_storage &peer);
+  void touch_client_(const sockaddr_storage &peer);
   void free_client_(NetCoapClient *client);
   void ping_client_(NetCoapClient *client);
   void cancel_ping_client_(NetCoapClient *client);
 
-  NetCoapObserver *get_observer_(const uint8_t *token, uint8_t token_len, const sockaddr_in6 &peer);
-  NetCoapObserver *new_observer_(NetCoapResource *resource, const sockaddr_in6 &peer, const uint8_t *token,
+  NetCoapObserver *get_observer_(const uint8_t *token, uint8_t token_len, const sockaddr_storage &peer);
+  NetCoapObserver *new_observer_(NetCoapResource *resource, const sockaddr_storage &peer, const uint8_t *token,
                                  uint8_t token_len, bool is_con);
   void free_observer_(NetCoapObserver *observer);
 
@@ -621,7 +621,7 @@ class CoapServerNet : public CoapServer {
   struct TwtQueueEntry {
     uint8_t data[1280];
     uint16_t len;
-    sockaddr_in6 peer;
+    sockaddr_storage peer;
   };
   StaticRingBuffer<TwtQueueEntry, USE_COAP_SERVER_TWT_QUEUE_DEPTH> twt_queue_{};
   bool twt_queuing_enabled_{false};

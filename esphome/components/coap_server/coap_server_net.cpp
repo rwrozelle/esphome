@@ -14,6 +14,7 @@
 namespace esphome::coap_server {
 
 static const char *const TAG = "coap_server";
+static const size_t ADDR_STR_LEN = 46;  // large enough for IPv4 and IPv6 (INET6_ADDRSTRLEN)
 
 // Response type: CON(0)→ACK(2), NON(1)→NON(1)
 static inline uint8_t resp_type(uint8_t req_type) { return (req_type == 0) ? 2 : 1; }
@@ -22,12 +23,40 @@ static inline uint8_t resp_type(uint8_t req_type) { return (req_type == 0) ? 2 :
 // Link-format entry
 // ---------------------------------------------------------------------------
 
-static bool addr_equal(const sockaddr_in6 &a, const sockaddr_in6 &b) {
-  return memcmp(&a.sin6_addr, &b.sin6_addr, sizeof(a.sin6_addr)) == 0 && a.sin6_port == b.sin6_port;
+static socklen_t sockaddr_len(const sockaddr_storage &addr) {
+#if USE_NETWORK_IPV6
+  return addr.ss_family == AF_INET6 ? sizeof(sockaddr_in6) : sizeof(sockaddr_in);
+#else
+  (void) addr;
+  // Safe: socket_ip_loop_monitored pins AF_INET at compile time; all peers are IPv4.
+  // Would need ss_family check here for a dual-stack socket.
+  return sizeof(sockaddr_in);
+#endif
 }
 
-static void addr_to_str(const sockaddr_in6 &addr, char *buf, size_t len) {
-  inet_ntop(AF_INET6, &addr.sin6_addr, buf, (socklen_t) len);
+static bool addr_equal(const sockaddr_storage &a, const sockaddr_storage &b) {
+  if (a.ss_family != b.ss_family)
+    return false;
+#if USE_NETWORK_IPV6
+  if (a.ss_family == AF_INET6) {
+    const auto &a6 = reinterpret_cast<const sockaddr_in6 &>(a);
+    const auto &b6 = reinterpret_cast<const sockaddr_in6 &>(b);
+    return memcmp(&a6.sin6_addr, &b6.sin6_addr, sizeof(a6.sin6_addr)) == 0 && a6.sin6_port == b6.sin6_port;
+  }
+#endif
+  const auto &a4 = reinterpret_cast<const sockaddr_in &>(a);
+  const auto &b4 = reinterpret_cast<const sockaddr_in &>(b);
+  return a4.sin_addr.s_addr == b4.sin_addr.s_addr && a4.sin_port == b4.sin_port;
+}
+
+static void addr_to_str(const sockaddr_storage &addr, char *buf, size_t len) {
+#if USE_NETWORK_IPV6
+  if (addr.ss_family == AF_INET6) {
+    inet_ntop(AF_INET6, &reinterpret_cast<const sockaddr_in6 &>(addr).sin6_addr, buf, (socklen_t) len);
+    return;
+  }
+#endif
+  inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in &>(addr).sin_addr, buf, (socklen_t) len);
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +84,7 @@ void CoapServerNet::setup() {
 
   this->resources_.init(CoapServer::count_resources());
 
-  this->sock_ = socket::socket_loop_monitored(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+  this->sock_ = socket::socket_ip_loop_monitored(SOCK_DGRAM, IPPROTO_UDP);
   if (!this->sock_) {
     ESP_LOGE(TAG, "CoAP Net: socket() failed");
     this->mark_failed();
@@ -63,11 +92,9 @@ void CoapServerNet::setup() {
   }
   int yes = 1;
   this->sock_->setsockopt(SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-  sockaddr_in6 bind_addr{};
-  bind_addr.sin6_family = AF_INET6;
-  bind_addr.sin6_port = htons(USE_COAP_SERVER_PORT);
-  bind_addr.sin6_addr = in6addr_any;
-  if (this->sock_->bind((sockaddr *) &bind_addr, sizeof(bind_addr)) < 0) {
+  sockaddr_storage bind_addr{};
+  socklen_t bind_len = socket::set_sockaddr_any((sockaddr *) &bind_addr, sizeof(bind_addr), USE_COAP_SERVER_PORT);
+  if (this->sock_->bind((sockaddr *) &bind_addr, bind_len) < 0) {
     ESP_LOGE(TAG, "CoAP Net: bind() failed");
     this->sock_.reset();
     this->mark_failed();
@@ -157,7 +184,11 @@ void CoapServerNet::setup() {
 void CoapServerNet::loop() {
   if (!this->sock_ || !this->sock_->ready())
     return;
-  sockaddr_in6 peer;
+  sockaddr_storage peer{};
+  // peerlen is not reset per iteration: safe because socket_ip_loop_monitored pins one
+  // address family, so every recvfrom on this socket returns the same address length.
+  // A dual-stack socket delivering mixed-family datagrams would require resetting peerlen
+  // to sizeof(peer) before each call.
   socklen_t peerlen = sizeof(peer);
   ssize_t n;
   while ((n = this->sock_->recvfrom(this->recv_buf_, sizeof(this->recv_buf_), (sockaddr *) &peer, &peerlen)) > 0)
@@ -333,7 +364,7 @@ bool CoapServerNet::parse_coap(const uint8_t *buf, size_t len, CoapPacket *pkt) 
 // process_datagram_ — dispatcher
 // ---------------------------------------------------------------------------
 
-void CoapServerNet::process_datagram_(const uint8_t *buf, size_t len, const sockaddr_in6 *peer) {
+void CoapServerNet::process_datagram_(const uint8_t *buf, size_t len, const sockaddr_storage *peer) {
   CoapPacket pkt{};
   if (!parse_coap(buf, len, &pkt)) {
     ESP_LOGW(TAG, "CoAP Net: malformed packet, dropping");
@@ -390,7 +421,7 @@ void CoapServerNet::process_datagram_(const uint8_t *buf, size_t len, const sock
 // send_response
 // ---------------------------------------------------------------------------
 
-void CoapServerNet::send_response(const uint8_t *buf, size_t len, const sockaddr_in6 *peer) {
+void CoapServerNet::send_response(const uint8_t *buf, size_t len, const sockaddr_storage *peer) {
 #ifdef USE_WIFI_TWT
   if (this->twt_queuing_enabled_) {
     TwtQueueEntry entry;
@@ -408,7 +439,7 @@ void CoapServerNet::send_response(const uint8_t *buf, size_t len, const sockaddr
   if (!this->sock_)
     return;
   ESP_LOGV(TAG, "CoAP Net: tx code=0x%02x len=%u", len > 1 ? buf[1] : 0u, (unsigned) len);
-  if (this->sock_->sendto(buf, len, 0, (const sockaddr *) peer, sizeof(*peer)) < 0)
+  if (this->sock_->sendto(buf, len, 0, (const sockaddr *) peer, sockaddr_len(*peer)) < 0)
     ESP_LOGW(TAG, "CoAP Net: sendto failed, dropping tx");
 }
 
@@ -423,7 +454,7 @@ void CoapServerNet::flush_twt_queue_() {
     if (this->sock_) {
       ESP_LOGV(TAG, "CoAP Net: TWT flush tx code=0x%02x len=%u", entry.len > 1 ? entry.data[1] : 0u,
                (unsigned) entry.len);
-      if (this->sock_->sendto(entry.data, entry.len, 0, (const sockaddr *) &entry.peer, sizeof(entry.peer)) < 0)
+      if (this->sock_->sendto(entry.data, entry.len, 0, (const sockaddr *) &entry.peer, sockaddr_len(entry.peer)) < 0)
         ESP_LOGW(TAG, "CoAP Net: TWT flush sendto failed, dropping");
     }
   }
@@ -434,7 +465,7 @@ void CoapServerNet::flush_twt_queue_() {
 // handle_well_known_core_
 // ---------------------------------------------------------------------------
 
-void CoapServerNet::handle_well_known_core_(const CoapPacket &pkt, const sockaddr_in6 &peer) {
+void CoapServerNet::handle_well_known_core_(const CoapPacket &pkt, const sockaddr_storage &peer) {
   if (pkt.code != 0x01)
     return;
 
@@ -480,7 +511,7 @@ void CoapServerNet::handle_well_known_core_(const CoapPacket &pkt, const sockadd
 // handle_info_request_
 // ---------------------------------------------------------------------------
 
-void CoapServerNet::handle_info_request_(const CoapPacket &pkt, const sockaddr_in6 &peer) {
+void CoapServerNet::handle_info_request_(const CoapPacket &pkt, const sockaddr_storage &peer) {
   if (pkt.code != 0x01)
     return;
   uint8_t payload[512];
@@ -502,7 +533,7 @@ void CoapServerNet::handle_info_request_(const CoapPacket &pkt, const sockaddr_i
 // handle_ping_request_
 // ---------------------------------------------------------------------------
 
-void CoapServerNet::handle_ping_request_(const CoapPacket &pkt, const sockaddr_in6 &peer) {
+void CoapServerNet::handle_ping_request_(const CoapPacket &pkt, const sockaddr_storage &peer) {
   if (pkt.code != 0x01)
     return;
 
@@ -534,7 +565,8 @@ void CoapServerNet::handle_ping_request_(const CoapPacket &pkt, const sockaddr_i
 // handle_entity_request_
 // ---------------------------------------------------------------------------
 
-void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr_in6 &peer, NetCoapResource *resource) {
+void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr_storage &peer,
+                                           NetCoapResource *resource) {
   touch_client_(peer);
 
 #ifdef USE_COAP_OSCORE
@@ -705,7 +737,8 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
 // ---------------------------------------------------------------------------
 
 #ifdef USE_BUTTON
-void CoapServerNet::handle_button_request_(const CoapPacket &pkt, const sockaddr_in6 &peer, NetCoapResource *resource) {
+void CoapServerNet::handle_button_request_(const CoapPacket &pkt, const sockaddr_storage &peer,
+                                           NetCoapResource *resource) {
   touch_client_(peer);
   if (pkt.code != 0x02) {  // POST
     this->builder_.begin(resp_type(pkt.type), 0x85, pkt.message_id, pkt.token, pkt.token_len);
@@ -747,7 +780,7 @@ void CoapServerNet::handle_button_request_(const CoapPacket &pkt, const sockaddr
 // handle_con_response_ — ACK/RST from client for a CON notification we sent
 // ---------------------------------------------------------------------------
 
-void CoapServerNet::handle_con_response_(const CoapPacket &pkt, const sockaddr_in6 &peer) {
+void CoapServerNet::handle_con_response_(const CoapPacket &pkt, const sockaddr_storage &peer) {
   for (NetCoapObserver **pp = &this->active_observers_; *pp != nullptr; pp = &(*pp)->next) {
     NetCoapObserver *obs = *pp;
     if (!obs->is_con || !obs->con_pending || obs->con_msg_id != pkt.message_id || !addr_equal(obs->peer_addr, peer))
@@ -909,7 +942,7 @@ NetCoapResource *CoapServerNet::find_resource_(const char *path) {
 // Client management
 // ---------------------------------------------------------------------------
 
-NetCoapClient *CoapServerNet::new_client_(const sockaddr_in6 &peer) {
+NetCoapClient *CoapServerNet::new_client_(const sockaddr_storage &peer) {
   NetCoapClient *result = nullptr;
   for (uint8_t i = 0; i < USE_COAP_SERVER_MAX_CLIENTS; i++) {
     auto &c = this->active_clients_[i];
@@ -934,7 +967,7 @@ NetCoapClient *CoapServerNet::new_client_(const sockaddr_in6 &peer) {
     }
   }
   if (result != nullptr) {
-    char addr_str[INET6_ADDRSTRLEN];
+    char addr_str[ADDR_STR_LEN];
     addr_to_str(peer, addr_str, sizeof(addr_str));
     this->client_connected_callback_(std::string(addr_str));
     ping_client_(result);
@@ -942,15 +975,28 @@ NetCoapClient *CoapServerNet::new_client_(const sockaddr_in6 &peer) {
   return result;
 }
 
-NetCoapClient *CoapServerNet::find_client_(const sockaddr_in6 &peer) {
+NetCoapClient *CoapServerNet::find_client_(const sockaddr_storage &peer) {
   for (auto &c : this->active_clients_) {
-    if (c.active && memcmp(&c.peer_addr.sin6_addr, &peer.sin6_addr, sizeof(peer.sin6_addr)) == 0)
+    if (!c.active || c.peer_addr.ss_family != peer.ss_family)
+      continue;
+#if USE_NETWORK_IPV6
+    if (peer.ss_family == AF_INET6) {
+      const auto &c6 = reinterpret_cast<const sockaddr_in6 &>(c.peer_addr);
+      const auto &p6 = reinterpret_cast<const sockaddr_in6 &>(peer);
+      if (memcmp(&c6.sin6_addr, &p6.sin6_addr, sizeof(p6.sin6_addr)) == 0)
+        return &c;
+      continue;  // must not fall through to IPv4 cast below
+    }
+#endif
+    const auto &c4 = reinterpret_cast<const sockaddr_in &>(c.peer_addr);
+    const auto &p4 = reinterpret_cast<const sockaddr_in &>(peer);
+    if (c4.sin_addr.s_addr == p4.sin_addr.s_addr)
       return &c;
   }
   return nullptr;
 }
 
-void CoapServerNet::touch_client_(const sockaddr_in6 &peer) {
+void CoapServerNet::touch_client_(const sockaddr_storage &peer) {
   NetCoapClient *c = find_client_(peer);
   if (c != nullptr) {
     c->last_response_ms = millis();
@@ -960,11 +1006,11 @@ void CoapServerNet::touch_client_(const sockaddr_in6 &peer) {
 
 void CoapServerNet::free_client_(NetCoapClient *client) {
   cancel_ping_client_(client);
-  sockaddr_in6 peer_addr = client->peer_addr;
+  sockaddr_storage peer_addr = client->peer_addr;
   client->active = false;
   this->active_client_count_--;
 
-  char addr_str[INET6_ADDRSTRLEN];
+  char addr_str[ADDR_STR_LEN];
   addr_to_str(peer_addr, addr_str, sizeof(addr_str));
   this->client_disconnected_callback_(std::string(addr_str));
 
@@ -1022,7 +1068,7 @@ void CoapServerNet::cancel_ping_client_(NetCoapClient *client) {
 // Observer management
 // ---------------------------------------------------------------------------
 
-NetCoapObserver *CoapServerNet::get_observer_(const uint8_t *token, uint8_t token_len, const sockaddr_in6 &peer) {
+NetCoapObserver *CoapServerNet::get_observer_(const uint8_t *token, uint8_t token_len, const sockaddr_storage &peer) {
   for (auto *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
     if (obs->token_len == token_len && memcmp(obs->token, token, token_len) == 0 && addr_equal(obs->peer_addr, peer))
       return obs;
@@ -1030,8 +1076,8 @@ NetCoapObserver *CoapServerNet::get_observer_(const uint8_t *token, uint8_t toke
   return nullptr;
 }
 
-NetCoapObserver *CoapServerNet::new_observer_(NetCoapResource *resource, const sockaddr_in6 &peer, const uint8_t *token,
-                                              uint8_t token_len, bool is_con) {
+NetCoapObserver *CoapServerNet::new_observer_(NetCoapResource *resource, const sockaddr_storage &peer,
+                                              const uint8_t *token, uint8_t token_len, bool is_con) {
   NetCoapObserver *obs;
   if (this->free_observers_ != nullptr) {
     obs = this->free_observers_;
@@ -1127,7 +1173,7 @@ void CoapServerNet::flush_logs_() {
   this->set_timeout("log_flush", 1000, [this]() { this->flush_logs_(); });
 }
 
-void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_in6 &peer) {
+void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_storage &peer) {
   touch_client_(peer);
   if (pkt.code != 0x01)
     return;  // GET only
