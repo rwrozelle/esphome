@@ -94,6 +94,10 @@ inline bool Socket::ready() const {
 /// Create a socket of the given domain, type and protocol.
 std::unique_ptr<Socket> socket(int domain, int type, int protocol);
 /// Create a socket in the newest available IP domain (IPv6 or IPv4) of the given type and protocol.
+/// The address family is fixed at compile time: AF_INET6 on USE_NETWORK_IPV6 builds, AF_INET otherwise.
+/// Unlike socket_ip_loop_monitored(), IPV6_V6ONLY is NOT cleared — the socket is IPv6-only on IPv6
+/// builds. Intended for outgoing connections where the caller resolves the target address family and
+/// connects to a matching address; not suitable for servers that need to accept both IPv4 and IPv6.
 std::unique_ptr<Socket> socket_ip(int type, int protocol);
 
 /// Create a socket and monitor it for data in the main loop.
@@ -111,7 +115,6 @@ std::unique_ptr<Socket> socket_loop_monitored(int domain, int type, int protocol
 // LWIP_TCP has separate Socket/ListenSocket types — needs distinct factory functions.
 std::unique_ptr<ListenSocket> socket_listen(int domain, int type, int protocol);
 std::unique_ptr<ListenSocket> socket_listen_loop_monitored(int domain, int type, int protocol);
-std::unique_ptr<ListenSocket> socket_ip_loop_monitored(int type, int protocol);
 #else
 // BSD and LWIP_SOCKETS: Socket == ListenSocket, so listen variants just delegate.
 inline std::unique_ptr<ListenSocket> socket_listen(int domain, int type, int protocol) {
@@ -120,14 +123,11 @@ inline std::unique_ptr<ListenSocket> socket_listen(int domain, int type, int pro
 inline std::unique_ptr<ListenSocket> socket_listen_loop_monitored(int domain, int type, int protocol) {
   return socket_loop_monitored(domain, type, protocol);
 }
-inline std::unique_ptr<ListenSocket> socket_ip_loop_monitored(int type, int protocol) {
-#if USE_NETWORK_IPV6
-  return socket_loop_monitored(AF_INET6, type, protocol);
-#else
-  return socket_loop_monitored(AF_INET, type, protocol);
 #endif
-}
-#endif
+/// Create a listening socket in the newest available IP domain and monitor it for data in
+/// the main loop. On non-LWIP_TCP IPv6 builds the socket is dual-stack (IPV6_V6ONLY cleared)
+/// so it also receives IPv4 traffic via IPv4-mapped addresses.
+std::unique_ptr<ListenSocket> socket_ip_loop_monitored(int type, int protocol);
 
 /// Set a sockaddr to the specified address and port for the IP version used by socket_ip().
 /// @param addr Destination sockaddr structure
@@ -144,6 +144,22 @@ inline socklen_t set_sockaddr(struct sockaddr *addr, socklen_t addrlen, const st
 
 /// Set a sockaddr to the any address and specified port for the IP version used by socket_ip().
 socklen_t set_sockaddr_any(struct sockaddr *addr, socklen_t addrlen, uint16_t port);
+
+#if defined(USE_SOCKET_IMPL_BSD_SOCKETS) || defined(USE_SOCKET_IMPL_LWIP_SOCKETS)
+/// Join a multicast group and fill addr for a subsequent bind().
+/// Dispatches on address type: IPv4 addresses use IP_ADD_MEMBERSHIP on an AF_INET socket;
+/// IPv6 addresses use IPV6_JOIN_GROUP on an AF_INET6 socket (USE_NETWORK_IPV6 builds only).
+/// The caller must create the socket with the matching address family before calling.
+/// @param sock       The socket to join the group on
+/// @param addr       Destination sockaddr to fill for bind()
+/// @param addrlen    Size of addr buffer
+/// @param ip_address  Null-terminated multicast address string (IPv4 e.g. "239.0.0.1" or IPv6 e.g. "ff02::1")
+/// @param port        Port number in host byte order
+/// @param if_index_out Optional: receives the netif index used for the IPv6 join (0 for IPv4 or on failure)
+/// @return Size of the sockaddr filled, or 0 on error (errno set)
+socklen_t join_multicast_group(Socket *sock, struct sockaddr *addr, socklen_t addrlen, const char *ip_address,
+                               uint16_t port, uint8_t *if_index_out = nullptr);
+#endif
 
 /// Format sockaddr into caller-provided buffer, returns length written (excluding null)
 size_t format_sockaddr_to(const struct sockaddr *addr_ptr, socklen_t len, std::span<char, SOCKADDR_STR_LEN> buf);

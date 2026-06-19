@@ -8,6 +8,12 @@
 #ifdef USE_HOST
 #include "esphome/core/wake.h"
 #endif
+#if defined(USE_HOST) || defined(USE_ZEPHYR)
+#include <ifaddrs.h>
+#include <net/if.h>
+#else
+#include "lwip/netif.h"
+#endif
 
 namespace esphome::socket {
 
@@ -92,15 +98,139 @@ std::unique_ptr<Socket> socket_ip(int type, int protocol) {
 #endif /* USE_NETWORK_IPV6 */
 }
 
-#ifdef USE_SOCKET_IMPL_LWIP_TCP
-// LWIP_TCP has separate Socket/ListenSocket types — needs out-of-line factory.
-// BSD and LWIP_SOCKETS define this inline in socket.h.
 std::unique_ptr<ListenSocket> socket_ip_loop_monitored(int type, int protocol) {
 #if USE_NETWORK_IPV6
-  return socket_listen_loop_monitored(AF_INET6, type, protocol);
+  const int af = AF_INET6;
 #else
-  return socket_listen_loop_monitored(AF_INET, type, protocol);
-#endif /* USE_NETWORK_IPV6 */
+  const int af = AF_INET;
+#endif
+#ifdef USE_SOCKET_IMPL_LWIP_TCP
+  return socket_listen_loop_monitored(af, type, protocol);
+#else
+  auto sock = socket_loop_monitored(af, type, protocol);
+#if USE_NETWORK_IPV6
+  if (sock != nullptr) {
+    int disable = 0;
+    if (sock->setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, &disable, sizeof(disable)) < 0) {
+      return nullptr;
+    }
+  }
+#endif
+  return sock;
+#endif
+}
+
+#if defined(USE_SOCKET_IMPL_BSD_SOCKETS) || defined(USE_SOCKET_IMPL_LWIP_SOCKETS)
+socklen_t join_multicast_group(Socket *sock, struct sockaddr *addr, socklen_t addrlen, const char *ip_address,
+                               uint16_t port, uint8_t *if_index_out) {
+  if (strchr(ip_address, ':') == nullptr) {
+    if (addrlen < sizeof(sockaddr_in)) {
+      errno = EINVAL;
+      return 0;
+    }
+    struct in_addr ipv4mc {};
+#ifdef USE_ZEPHYR
+    if (zsock_inet_pton(AF_INET, ip_address, &ipv4mc) != 1) {
+#else
+    if (inet_aton(ip_address, &ipv4mc) == 0) {
+#endif
+      errno = EINVAL;
+      return 0;
+    }
+    struct ip_mreq imreq {};
+    imreq.imr_interface.s_addr = ESPHOME_INADDR_ANY;
+    imreq.imr_multiaddr = ipv4mc;
+    if (sock->setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, &imreq, sizeof(imreq)) < 0) {
+      return 0;
+    }
+    if (if_index_out != nullptr) {
+      *if_index_out = 0;
+    }
+    return set_sockaddr(addr, addrlen, ip_address, port);
+  }
+#if USE_NETWORK_IPV6
+  if (addrlen < sizeof(sockaddr_in6)) {
+    errno = EINVAL;
+    return 0;
+  }
+  struct ipv6_mreq imreq6 {};
+#ifdef USE_SOCKET_IMPL_BSD_SOCKETS
+#ifdef USE_ZEPHYR
+  if (zsock_inet_pton(AF_INET6, ip_address, &imreq6.ipv6mr_multiaddr) != 1) {
+#else
+  if (inet_pton(AF_INET6, ip_address, &imreq6.ipv6mr_multiaddr) != 1) {
+#endif
+    errno = EINVAL;
+    return 0;
+  }
+#else
+  ip6_addr_t ip6;
+  if (!inet6_aton(ip_address, &ip6)) {
+    errno = EINVAL;
+    return 0;
+  }
+  memcpy(imreq6.ipv6mr_multiaddr.un.u32_addr, ip6.addr, sizeof(ip6.addr));
+#endif
+  // Both POSIX and LwIP require an explicit interface index.
+  // POSIX: interface=0 fails for link-local multicast (ff02::) and may select loopback for
+  // other scopes. LwIP: NETIF_NO_INDEX=0 is always rejected. Iterate directly to a real
+  // non-loopback interface on both platforms.
+  imreq6.ipv6mr_interface = 0;
+  bool joined = false;
+#if defined(USE_HOST) || defined(USE_ZEPHYR)
+  struct ifaddrs *ifaddr;
+  if (getifaddrs(&ifaddr) == 0) {
+    for (struct ifaddrs *ifa = ifaddr; ifa != nullptr && !joined; ifa = ifa->ifa_next) {
+      if (ifa->ifa_addr == nullptr || ifa->ifa_addr->sa_family != AF_INET6) {
+        continue;
+      }
+      if ((ifa->ifa_flags & IFF_LOOPBACK) || !(ifa->ifa_flags & IFF_UP)) {
+        continue;
+      }
+      unsigned int idx = if_nametoindex(ifa->ifa_name);
+      if (idx == 0) {
+        continue;
+      }
+      imreq6.ipv6mr_interface = idx;
+      if (sock->setsockopt(IPPROTO_IPV6, IPV6_JOIN_GROUP, &imreq6, sizeof(imreq6)) == 0) {
+        joined = true;
+      }
+    }
+    freeifaddrs(ifaddr);
+  }
+#else  // embedded — LwIP NETIF_FOREACH available on all embedded targets
+  struct netif *netif;
+  NETIF_FOREACH(netif) {
+    if (netif->name[0] == 'l' && netif->name[1] == 'o') {
+      continue;
+    }
+    imreq6.ipv6mr_interface = netif_get_index(netif);
+    if (sock->setsockopt(IPPROTO_IPV6, IPV6_JOIN_GROUP, &imreq6, sizeof(imreq6)) == 0) {
+      joined = true;
+      break;
+    }
+  }
+#endif
+  if (!joined) {
+    return 0;
+  }
+  if (if_index_out != nullptr) {
+    *if_index_out = static_cast<uint8_t>(imreq6.ipv6mr_interface);
+  }
+  socklen_t filled = set_sockaddr(addr, addrlen, ip_address, port);
+#if defined(USE_HOST) || defined(USE_ZEPHYR)
+  if (filled == sizeof(sockaddr_in6)) {
+    // POSIX bind() on link-local multicast (ff02::, ff12::) requires sin6_scope_id
+    // set to the interface index. Harmless for site-local and global scopes.
+    // Not needed on LwIP which ignores sin6_scope_id in bind().
+    reinterpret_cast<sockaddr_in6 *>(addr)->sin6_scope_id = imreq6.ipv6mr_interface;
+  }
+#endif
+  return filled;
+#else
+  errno = EINVAL;
+  return 0;
+#endif
 }
 #endif
 
