@@ -164,6 +164,12 @@ def _validate_twt(config):
     return config
 
 
+def _validate_host(config):
+    if CORE.is_host and CONF_OSCORE in config:
+        raise cv.Invalid("'oscore' is not supported on the host platform")
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -211,6 +217,7 @@ CONFIG_SCHEMA = cv.All(
     _validate_subscription_mode,
     _validate_transport,
     _validate_twt,
+    _validate_host,
 )
 
 
