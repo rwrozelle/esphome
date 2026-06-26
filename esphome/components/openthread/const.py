@@ -1,5 +1,5 @@
+CONF_CONFIG_OPTIONS = "config_options"
 CONF_DEVICE_TYPE = "device_type"
-CONF_ENABLE_WAKEUP_COORDINATION = "enable_wakeup_coordination"
 CONF_EXT_PAN_ID = "ext_pan_id"
 CONF_FORCE_DATASET = "force_dataset"
 CONF_GRACEFUL_DETACH_ON_SHUTDOWN = "graceful_detach_on_shutdown"
