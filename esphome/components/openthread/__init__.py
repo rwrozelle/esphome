@@ -56,7 +56,6 @@ from .const import (
     CONF_NETWORK_NAME,
     CONF_ON_CHILD,
     CONF_ON_DETACHED,
-    CONF_ON_DISABLED,
     CONF_ON_LEADER,
     CONF_ON_ROUTER,
     CONF_PAN_ID,
@@ -174,6 +173,7 @@ openthread_ns = cg.esphome_ns.namespace("openthread")
 OpenThreadComponent = openthread_ns.class_("OpenThreadComponent", cg.Component)
 OpenThreadSrpComponent = openthread_ns.class_("OpenThreadSrpComponent", cg.Component)
 StateEnterForwarder = openthread_ns.class_("StateEnterForwarder")
+ot_device_role = cg.global_ns.enum("otDeviceRole")
 
 _CONNECTION_SCHEMA = cv.Schema(
     {
@@ -262,10 +262,14 @@ CONFIG_SCHEMA = cv.All(
                 cv.decibel,
                 _validate_txpower,
             ),
-            cv.Optional(CONF_POLL_PERIOD): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_POLL_PERIOD): cv.All(
+                cv.positive_time_period_milliseconds,
+                # OpenThread's own cap: values above kMaxExternalPeriod (0x3FFFFFF ms, ~18.6h)
+                # are silently clamped by otLinkSetPollPeriod() (data_poll_sender.hpp).
+                cv.Range(max=TimePeriodMilliseconds(milliseconds=0x3FFFFFF)),
+            ),
             cv.Optional(CONF_ON_STATE): automation.validate_automation({}),
             cv.Optional(CONF_ON_STATE_CHANGE): automation.validate_automation({}),
-            cv.Optional(CONF_ON_DISABLED): automation.validate_automation({}),
             cv.Optional(CONF_ON_DETACHED): automation.validate_automation({}),
             cv.Optional(CONF_ON_CHILD): automation.validate_automation({}),
             cv.Optional(CONF_ON_ROUTER): automation.validate_automation({}),
@@ -283,37 +287,32 @@ CONFIG_SCHEMA = cv.All(
 
 _CALLBACK_AUTOMATIONS = (
     automation.CallbackAutomation(
-        CONF_ON_STATE, "add_on_state_callback", [(cg.uint8, "x")]
+        CONF_ON_STATE, "add_on_state_callback", [(ot_device_role, "x")]
     ),
     automation.CallbackAutomation(
         CONF_ON_STATE_CHANGE,
         "add_full_state_callback",
-        [(cg.uint8, "x_previous"), (cg.uint8, "x")],
-    ),
-    automation.CallbackAutomation(
-        CONF_ON_DISABLED,
-        "add_on_state_callback",
-        forwarder=StateEnterForwarder.template(0),
+        [(ot_device_role, "x_previous"), (ot_device_role, "x")],
     ),
     automation.CallbackAutomation(
         CONF_ON_DETACHED,
         "add_on_state_callback",
-        forwarder=StateEnterForwarder.template(1),
+        forwarder=StateEnterForwarder.template(ot_device_role.OT_DEVICE_ROLE_DETACHED),
     ),
     automation.CallbackAutomation(
         CONF_ON_CHILD,
         "add_on_state_callback",
-        forwarder=StateEnterForwarder.template(2),
+        forwarder=StateEnterForwarder.template(ot_device_role.OT_DEVICE_ROLE_CHILD),
     ),
     automation.CallbackAutomation(
         CONF_ON_ROUTER,
         "add_on_state_callback",
-        forwarder=StateEnterForwarder.template(3),
+        forwarder=StateEnterForwarder.template(ot_device_role.OT_DEVICE_ROLE_ROUTER),
     ),
     automation.CallbackAutomation(
         CONF_ON_LEADER,
         "add_on_state_callback",
-        forwarder=StateEnterForwarder.template(4),
+        forwarder=StateEnterForwarder.template(ot_device_role.OT_DEVICE_ROLE_LEADER),
     ),
 )
 

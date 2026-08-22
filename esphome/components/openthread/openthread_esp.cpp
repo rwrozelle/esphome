@@ -45,9 +45,6 @@ void OpenThreadComponent::setup() {
 #if CONFIG_OPENTHREAD_CLI
   esp_openthread_cli_init();
 #endif
-#if CONFIG_OPENTHREAD_CLI_ESP_EXTENSION
-  ot_register_external_commands();
-#endif
 
   esp_openthread_config_t config = {.netif_config = ESP_NETIF_DEFAULT_OPENTHREAD(),
                                     .platform_config = {
@@ -171,6 +168,12 @@ InstanceLock InstanceLock::try_acquire(int delay) {
 }
 
 InstanceLock InstanceLock::acquire() {
+  // teardown() clears global_openthread_component before the stack fully stops; a caller
+  // racing teardown would otherwise dereference a null pointer below.
+  if (global_openthread_component == nullptr) {
+    ESP_LOGE(TAG, "OpenThread component torn down, cannot acquire instance lock");
+    abort();
+  }
   // Wait for the lock to be created before attempting to acquire it.
   // esp_openthread_lock_acquire() will assert-crash if called before esp_openthread_init().
   constexpr uint32_t lock_init_timeout_ms = 10000;
