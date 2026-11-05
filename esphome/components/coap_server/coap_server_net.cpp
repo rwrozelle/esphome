@@ -13,7 +13,7 @@
 
 namespace esphome::coap_server {
 
-static const char *const TAG = "coap_server";
+ESPHOME_LOG_TAG(TAG, "coap_server");
 static const size_t ADDR_STR_LEN = 46;  // large enough for IPv4 and IPv6 (INET6_ADDRSTRLEN)
 
 // Response type: CON(0)→ACK(2), NON(1)→NON(1)
@@ -67,20 +67,6 @@ void CoapServerNet::setup() {
   CoapServer::setup();
   if (this->is_failed())
     return;
-
-#ifdef USE_WIFI_TWT
-  if (wifi_twt::global_wifi_twt_component != nullptr) {
-    wifi_twt::global_wifi_twt_component->add_on_start_callback([this]() { this->twt_queuing_enabled_ = true; });
-    wifi_twt::global_wifi_twt_component->add_on_wakeup_callback([this]() {
-      this->flush_twt_queue_();
-      this->twt_queuing_enabled_ = false;  // We're awake now — send directly
-    });
-    wifi_twt::global_wifi_twt_component->add_on_stop_callback([this]() {
-      this->flush_twt_queue_();
-      this->twt_queuing_enabled_ = false;
-    });
-  }
-#endif
 
   this->resources_.init(CoapServer::count_resources());
 
@@ -212,10 +198,6 @@ bool CoapServerNet::teardown() {
     this->sock_->close();
     this->sock_.reset();
   }
-#ifdef USE_WIFI_TWT
-  this->twt_queuing_enabled_ = false;
-  this->twt_queue_.clear();
-#endif
   return true;
 }
 
@@ -422,44 +404,13 @@ void CoapServerNet::process_datagram_(const uint8_t *buf, size_t len, const sock
 // ---------------------------------------------------------------------------
 
 void CoapServerNet::send_response(const uint8_t *buf, size_t len, const sockaddr_storage *peer) {
-#ifdef USE_WIFI_TWT
-  if (this->twt_queuing_enabled_) {
-    TwtQueueEntry entry;
-    entry.len = static_cast<uint16_t>(std::min(len, sizeof(entry.data)));
-    memcpy(entry.data, buf, entry.len);
-    entry.peer = *peer;
-    if (!this->twt_queue_.push(entry)) {
-      ESP_LOGW(TAG, "CoAP Net: TWT queue full, dropping oldest response");
-      this->twt_queue_.pop();
-      this->twt_queue_.push(entry);
-    }
-    return;
-  }
-#endif
   if (!this->sock_)
     return;
   ESP_LOGV(TAG, "CoAP Net: tx code=0x%02x len=%u", len > 1 ? buf[1] : 0u, (unsigned) len);
-  if (this->sock_->sendto(buf, len, 0, (const sockaddr *) peer, sockaddr_len(*peer)) < 0)
+  if (this->sock_->sendto(buf, len, 0, (const sockaddr *) peer, sockaddr_len(*peer)) < 0) {
     ESP_LOGW(TAG, "CoAP Net: sendto failed, dropping tx");
-}
-
-#ifdef USE_WIFI_TWT
-void CoapServerNet::flush_twt_queue_() {
-  this->twt_queuing_enabled_ = false;
-  if (this->twt_queue_.empty())
-    return;
-  while (!this->twt_queue_.empty()) {
-    TwtQueueEntry entry = this->twt_queue_.front();
-    this->twt_queue_.pop();
-    if (this->sock_) {
-      ESP_LOGV(TAG, "CoAP Net: TWT flush tx code=0x%02x len=%u", entry.len > 1 ? entry.data[1] : 0u,
-               (unsigned) entry.len);
-      if (this->sock_->sendto(entry.data, entry.len, 0, (const sockaddr *) &entry.peer, sockaddr_len(entry.peer)) < 0)
-        ESP_LOGW(TAG, "CoAP Net: TWT flush sendto failed, dropping");
-    }
   }
 }
-#endif
 
 // ---------------------------------------------------------------------------
 // handle_well_known_core_
@@ -622,7 +573,8 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
         bool is_con = (pkt.type == 0);
         if (this->get_subscription_confirm() != is_con) {
           ESP_LOGW(TAG, "CoAP Net: observe type mismatch on /%s (want %s, got %s)", resource->path,
-                   this->get_subscription_confirm() ? "CON" : "NON", is_con ? "CON" : "NON");
+                   this->get_subscription_confirm() ? LOG_STR_LITERAL("CON") : LOG_STR_LITERAL("NON"),
+                   is_con ? LOG_STR_LITERAL("CON") : LOG_STR_LITERAL("NON"));
           this->builder_.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
           send_response(this->builder_.buf, this->builder_.pos, &peer);
           return;

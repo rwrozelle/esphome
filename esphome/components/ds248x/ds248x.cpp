@@ -4,7 +4,7 @@
 
 namespace esphome::ds248x {
 
-static const char *const TAG = "ds248x";
+ESPHOME_LOG_TAG(TAG, "ds248x");
 
 void DS248xComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up DS248x...");
@@ -31,11 +31,8 @@ void DS248xComponent::setup() {
   }
 
   // Configure device
-  if (!this->device_configure_()) {
-    ESP_LOGE(TAG, "DS248x configuration failed!");
-    this->mark_failed();
+  if (!this->setup_check(this->device_configure_(), LOG_STR("DS248x configuration failed!")))
     return;
-  }
 
   // Reset to Channel 0
   this->select_channel(0);

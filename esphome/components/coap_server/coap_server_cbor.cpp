@@ -14,7 +14,7 @@
 
 namespace esphome::coap_server {
 
-static const char *const TAG = "coap_server";
+ESPHOME_LOG_TAG(TAG, "coap_server");
 
 // SenML CBOR integer key assignments (RFC 8428):
 //   1 = unit (u), 2 = float value (v), 3 = string value (vs), 4 = boolean value (vb)
@@ -196,7 +196,8 @@ size_t CoapServer::cbor_output_(uint8_t *buffer, size_t buf_len, EntityBase *ent
       ESP_LOGE(TAG, "CBOR encode: state of '%s' exceeds %u-byte buffer — truncated to nothing",
                entity->get_name().c_str(), (unsigned) buf_len);
     } else {
-      ESP_LOGE(TAG, "CBOR encode error %d for entity '%s'", err, entity != nullptr ? entity->get_name().c_str() : "?");
+      ESP_LOGE(TAG, "CBOR encode error %d for entity '%s'", err,
+               entity != nullptr ? entity->get_name().c_str() : LOG_STR_LITERAL("?"));
     }
     return 0;
   }

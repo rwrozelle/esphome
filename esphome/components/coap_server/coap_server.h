@@ -1,11 +1,8 @@
 #pragma once
 #include "esphome/core/defines.h"
-#ifdef USE_WIFI_TWT
-#include "esphome/components/wifi_twt/wifi_twt.h"
-#endif
 #include "esphome/core/component.h"
-#include "esphome/core/controller.h"
 #include "esphome/core/entity_base.h"
+#include "esphome/core/entity_includes.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/util.h"
 #include <array>
@@ -141,7 +138,7 @@ struct ehCoapObserver : CoapObserverBase {
 #endif  // USE_OPENTHREAD
 
 // Abstract base — transport-agnostic logic, OSCORE crypto, Controller entity dispatch
-class CoapServer : public Component, public Controller {
+class CoapServer : public Component {
  public:
   CoapServer();
   void setup() override;
@@ -173,25 +170,68 @@ class CoapServer : public Component, public Controller {
   uint8_t get_observe_retry() const { return this->observe_retry_; }
 
 #ifdef USE_BINARY_SENSOR
-  void on_binary_sensor_update(binary_sensor::BinarySensor *entity) override;
+  void on_binary_sensor_update(binary_sensor::BinarySensor *entity);
 #endif
 #ifdef USE_LOCK
-  void on_lock_update(lock::Lock *entity) override;
+  void on_lock_update(lock::Lock *entity);
 #endif
 #ifdef USE_NUMBER
-  void on_number_update(number::Number *entity) override;
+  void on_number_update(number::Number *entity);
 #endif
 #ifdef USE_SENSOR
-  void on_sensor_update(sensor::Sensor *entity) override;
+  void on_sensor_update(sensor::Sensor *entity);
 #endif
 #ifdef USE_SWITCH
-  void on_switch_update(switch_::Switch *entity) override;
+  void on_switch_update(switch_::Switch *entity);
 #endif
 #ifdef USE_TEXT_SENSOR
-  void on_text_sensor_update(text_sensor::TextSensor *entity) override;
+  void on_text_sensor_update(text_sensor::TextSensor *entity);
 #endif
 #ifdef USE_VALVE
-  void on_valve_update(valve::Valve *entity) override;
+  void on_valve_update(valve::Valve *entity);
+#endif
+  // Not served over CoAP; these stubs only satisfy ControllerContract
+#ifdef USE_COVER
+  void on_cover_update(cover::Cover *) {}
+#endif
+#ifdef USE_FAN
+  void on_fan_update(fan::Fan *) {}
+#endif
+#ifdef USE_LIGHT
+  void on_light_update(light::LightState *) {}
+#endif
+#ifdef USE_CLIMATE
+  void on_climate_update(climate::Climate *) {}
+#endif
+#ifdef USE_DATETIME_DATE
+  void on_date_update(datetime::DateEntity *) {}
+#endif
+#ifdef USE_DATETIME_TIME
+  void on_time_update(datetime::TimeEntity *) {}
+#endif
+#ifdef USE_DATETIME_DATETIME
+  void on_datetime_update(datetime::DateTimeEntity *) {}
+#endif
+#ifdef USE_TEXT
+  void on_text_update(text::Text *) {}
+#endif
+#ifdef USE_SELECT
+  void on_select_update(select::Select *) {}
+#endif
+#ifdef USE_MEDIA_PLAYER
+  void on_media_player_update(media_player::MediaPlayer *) {}
+#endif
+#ifdef USE_ALARM_CONTROL_PANEL
+  void on_alarm_control_panel_update(alarm_control_panel::AlarmControlPanel *) {}
+#endif
+#ifdef USE_WATER_HEATER
+  void on_water_heater_update(water_heater::WaterHeater *) {}
+#endif
+#ifdef USE_EVENT
+  void on_event(event::Event *) {}
+#endif
+#ifdef USE_UPDATE
+  void on_update(update::UpdateEntity *) {}
 #endif
 
 #ifdef USE_COAP_OSCORE
@@ -617,16 +657,6 @@ class CoapServerNet : public CoapServer {
   std::unique_ptr<socket::Socket> sock_;
   uint16_t next_msg_id_{static_cast<uint16_t>(random_uint32())};
   FixedVector<NetCoapResource> resources_;
-#ifdef USE_WIFI_TWT
-  struct TwtQueueEntry {
-    uint8_t data[1280];
-    uint16_t len;
-    sockaddr_storage peer;
-  };
-  StaticRingBuffer<TwtQueueEntry, USE_COAP_SERVER_TWT_QUEUE_DEPTH> twt_queue_{};
-  bool twt_queuing_enabled_{false};
-  void flush_twt_queue_();
-#endif
   std::array<NetCoapClient, USE_COAP_SERVER_MAX_CLIENTS> active_clients_{};
   NetCoapObserver *active_observers_{nullptr};
   NetCoapObserver *free_observers_{nullptr};

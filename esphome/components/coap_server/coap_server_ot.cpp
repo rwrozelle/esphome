@@ -24,7 +24,7 @@
 
 namespace esphome::coap_server {
 
-static const char *const TAG = "coap_server";
+ESPHOME_LOG_TAG(TAG, "coap_server");
 
 // Determine the response type from the type of request CON or NON
 static otCoapType response_type(otMessage *request) {

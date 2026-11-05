@@ -1,6 +1,5 @@
 #include "coap_server.h"
 #include "esphome/core/application.h"
-#include "esphome/core/controller_registry.h"
 #include "esphome/core/device.h"
 #include "esphome/core/log.h"
 #include "cbor.h"
@@ -13,13 +12,12 @@
 
 namespace esphome::coap_server {
 
-static const char *const TAG = "coap_server";
+ESPHOME_LOG_TAG(TAG, "coap_server");
 
 CoapServer *global_coap_server = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 CoapServer::CoapServer() { global_coap_server = this; }
 
 void CoapServer::setup() {
-  ControllerRegistry::register_controller(this);
 #ifdef USE_COAP_OSCORE
   if (!this->oscore_derive_keys_()) {
     this->mark_failed();
@@ -572,8 +570,8 @@ size_t CoapServer::oscore_protect_response_(const uint8_t *inner, size_t inner_l
       return 0;
     }
   }
-  ESP_LOGV(TAG, "OSCORE: response encrypted (%s ciphertext=%u bytes)", is_notification ? "notification" : "reply",
-           (unsigned) out_len);
+  ESP_LOGV(TAG, "OSCORE: response encrypted (%s ciphertext=%u bytes)",
+           is_notification ? LOG_STR_LITERAL("notification") : LOG_STR_LITERAL("reply"), (unsigned) out_len);
   return out_len;
 }
 

@@ -1,7 +1,8 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import socket as esphome_socket
-from esphome.components.openthread.const import CONF_DEVICE_TYPE, CONF_POLL_PERIOD
+from esphome.components.const import CONF_DEVICE_TYPE
+from esphome.components.openthread.const import CONF_POLL_PERIOD
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ID,
@@ -29,14 +30,13 @@ from .const import (
     CONF_SERVER_PING_TIMEOUT_RATIO,
     CONF_SUBSCRIPTION_CONFIRM,
     CONF_TRANSPORT,
-    CONF_TWT_QUEUE_DEPTH,
 )
 
 DOMAIN = "coap_server"
 CODEOWNERS = ["@rwrozelle"]
 
 coap_server_ns = cg.esphome_ns.namespace("coap_server")
-CoapServer = coap_server_ns.class_("CoapServer", cg.Component, cg.Controller)
+CoapServer = coap_server_ns.class_("CoapServer", cg.Component)
 CoapServerOT = coap_server_ns.class_("CoapServerOT", CoapServer)
 CoapServerNet = coap_server_ns.class_("CoapServerNet", CoapServer)
 
@@ -156,14 +156,6 @@ def _validate_transport(config):
     return config
 
 
-def _validate_twt(config):
-    if CONF_TWT_QUEUE_DEPTH in config and "wifi_twt" not in CORE.loaded_integrations:
-        raise cv.Invalid(
-            f"'{CONF_TWT_QUEUE_DEPTH}' requires the 'wifi_twt' component to be configured"
-        )
-    return config
-
-
 def _validate_host(config):
     if CORE.is_host and CONF_OSCORE in config:
         raise cv.Invalid("'oscore' is not supported on the host platform")
@@ -210,13 +202,10 @@ CONFIG_SCHEMA = cv.All(
             ),
             # Optional OSCORE, if setup then client must send calls including OSCORE credentials
             cv.Optional(CONF_OSCORE): OSCORE_SCHEMA,
-            # Only valid when wifi_twt is configured
-            cv.Optional(CONF_TWT_QUEUE_DEPTH): cv.int_range(min=1, max=255),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_subscription_mode,
     _validate_transport,
-    _validate_twt,
     _validate_host,
 )
 
@@ -235,8 +224,7 @@ async def to_code(config):
 
     await cg.register_component(var, config)
     cg.add_define("USE_COAP_SERVER")
-    # Track controller registration for StaticVector sizing
-    CORE.register_controller()
+    CORE.register_controller(var)
 
     if not use_ot:
         esphome_socket.consume_sockets(1, DOMAIN, esphome_socket.SocketType.UDP)(config)
@@ -263,10 +251,6 @@ async def to_code(config):
             config[CONF_ON_CLIENT_DISCONNECTED],
         )
     cg.add_define("USE_COAP_SERVER_PORT", config[CONF_PORT])
-    if "wifi_twt" in CORE.loaded_integrations:
-        cg.add_define(
-            "USE_COAP_SERVER_TWT_QUEUE_DEPTH", config.get(CONF_TWT_QUEUE_DEPTH, 8)
-        )
     cg.add(var.set_subscription_confirm(config[CONF_SUBSCRIPTION_CONFIRM]))
     cg.add(var.set_observe_retry(config[CONF_OBSERVE_RETRY]))
 
