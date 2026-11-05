@@ -2,6 +2,7 @@ from esphome import automation
 import esphome.codegen as cg
 from esphome.components import socket as esphome_socket
 from esphome.components.const import CONF_DEVICE_TYPE
+from esphome.components.esp32 import require_mbedtls_tls_extras
 from esphome.components.openthread.const import CONF_POLL_PERIOD
 import esphome.config_validation as cv
 from esphome.const import (
@@ -256,6 +257,9 @@ async def to_code(config):
 
     if oscore := config.get(CONF_OSCORE):
         cg.add_define("USE_COAP_OSCORE")
+        if CORE.is_esp32:
+            # OSCORE encrypts with AES-CCM
+            require_mbedtls_tls_extras({"CONFIG_MBEDTLS_CCM_C"})
         cg.add(
             var.set_oscore_master_secret(_hex_to_bytes_list(oscore[CONF_MASTER_SECRET]))
         )
