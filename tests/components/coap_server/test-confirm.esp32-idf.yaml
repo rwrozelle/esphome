@@ -83,5 +83,3 @@ network:
 wifi:
   ssid: "test"
   password: "testpassword"
-
-socket:

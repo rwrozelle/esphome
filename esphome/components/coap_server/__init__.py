@@ -38,6 +38,14 @@ from .const import (
 DOMAIN = "coap_server"
 CODEOWNERS = ["@rwrozelle"]
 
+
+def AUTO_LOAD(config: ConfigType) -> list[str]:
+    """The network transport needs socket; only an explicit openthread transport goes without it."""
+    if config and config.get(CONF_TRANSPORT) == "openthread":
+        return []
+    return ["socket"]
+
+
 coap_server_ns = cg.esphome_ns.namespace("coap_server")
 CoapServer = coap_server_ns.class_("CoapServer", cg.Component)
 CoapServerOT = coap_server_ns.class_("CoapServerOT", CoapServer)
