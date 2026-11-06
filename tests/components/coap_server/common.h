@@ -4,7 +4,9 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -91,6 +93,47 @@ inline uint8_t string_table_index(const char *(*lookup)(uint8_t), const char *va
 // Server
 // ---------------------------------------------------------------------------
 
+#ifdef USE_COAP_OSCORE
+// Sends the OSCORE sequence number file to a fresh temporary folder instead of ~/.esphome/prefs
+class ScopedPrefDir {
+ public:
+  ScopedPrefDir() {
+    std::string tmpl = (std::filesystem::temp_directory_path() / "coap_server_test_XXXXXX").string();
+    if (mkdtemp(tmpl.data()) != nullptr) {
+      this->dir_ = tmpl;
+    } else {
+      ADD_FAILURE() << "mkdtemp failed for " << tmpl;
+    }
+    if (const char *old = getenv("ESPHOME_PREFDIR"); old != nullptr) {
+      this->had_old_ = true;
+      this->old_ = old;
+    }
+    // Without a folder of its own, a path that cannot be created, so nothing is written anywhere else
+    setenv("ESPHOME_PREFDIR", this->dir_.empty() ? "/proc/coap_server_test" : this->dir_.c_str(), 1);
+  }
+  ~ScopedPrefDir() {
+    if (this->had_old_) {
+      setenv("ESPHOME_PREFDIR", this->old_.c_str(), 1);
+    } else {
+      unsetenv("ESPHOME_PREFDIR");
+    }
+    if (!this->dir_.empty()) {
+      std::error_code ec;
+      std::filesystem::remove_all(this->dir_, ec);
+    }
+  }
+  ScopedPrefDir(const ScopedPrefDir &) = delete;
+  ScopedPrefDir &operator=(const ScopedPrefDir &) = delete;
+
+  const std::string &dir() const { return this->dir_; }
+
+ private:
+  std::string dir_;
+  std::string old_;
+  bool had_old_{false};
+};
+#endif
+
 // Captures outbound packets instead of using a socket, and exposes the protected members the tests drive
 class TestableCoapServerNet : public CoapServerNet {
  public:
@@ -114,9 +157,13 @@ class TestableCoapServerNet : public CoapServerNet {
     this->inject(pkt.data(), pkt.size(), peer);
   }
 
-  // Adds the resource(s) for one entity; plain requests work because OSCORE is not compiled in
-  void add_resource(EntityType type, EntityBase *entity, bool observable, uint16_t &senml_index) {
+  // Adds the resource(s) for one entity; exempt resources take plain requests when OSCORE is compiled in
+  void add_resource(EntityType type, EntityBase *entity, bool observable, uint16_t &senml_index,
+                    bool oscore_exempt = true) {
+    size_t first = this->resources_.size();
     this->add_net_resource_(type, entity, observable, senml_index);
+    for (size_t i = first; i < this->resources_.size(); i++)
+      this->resources_[i].oscore_exempt = oscore_exempt;
   }
 
   // Builds the .well-known/core cache from the App entity lists, as setup() does
@@ -166,6 +213,11 @@ class TestableCoapServerNet : public CoapServerNet {
   std::vector<uint8_t> last_sent;
 
  protected:
+#ifdef USE_COAP_OSCORE
+  // Notifications can save the sequence number
+  ScopedPrefDir pref_dir_;
+#endif
+
   void send_response(const uint8_t *buf, size_t len, const sockaddr_storage * /*peer*/) override {
     this->last_sent.assign(buf, buf + len);
   }

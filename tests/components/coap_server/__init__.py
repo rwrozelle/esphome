@@ -1,4 +1,5 @@
 import esphome.codegen as cg
+from esphome.components.coap_server import add_host_openssl
 from esphome.core import CORE
 from esphome.core.entity_helpers import (
     register_device_class,
@@ -30,6 +31,8 @@ def override_manifest(manifest: ComponentManifestOverride) -> None:
         cg.add_define("USE_COAP_SERVER_MAX_CLIENTS", 4)
         # Same value the socket tests set; the tests use both IPv4 and IPv6 peers
         cg.add_define("USE_NETWORK_IPV6", True)
+        cg.add_define("USE_COAP_OSCORE")
+        add_host_openssl()
         # The tests look these strings up by value in the generated tables
         register_device_class("temperature")
         cg.add_define("USE_ENTITY_DEVICE_CLASS")

@@ -167,11 +167,15 @@ TEST_F(DeviceInfoTest, ObserveRetryReflectsConfiguredValue) {
   EXPECT_EQ(value, 3u);
 }
 
-TEST_F(DeviceInfoTest, OscoreIsFalseWithoutOscore) {
+TEST_F(DeviceInfoTest, OscoreFlagMatchesBuild) {
   size_t len = this->encode();
   size_t vi = find_value(this->buf_, len, "oscore");
   ASSERT_NE(vi, SIZE_MAX);
+#ifdef USE_COAP_OSCORE
+  EXPECT_EQ(this->buf_[vi], 0xf5u);
+#else
   EXPECT_EQ(this->buf_[vi], 0xf4u);
+#endif
 }
 
 TEST_F(DeviceInfoTest, BufferTooSmallReturnsZero) {
