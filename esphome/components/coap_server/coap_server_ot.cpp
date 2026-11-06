@@ -14,10 +14,6 @@
     } \
   } while (false)
 #endif
-#ifdef USE_COAP_OSCORE
-#include <psa/crypto.h>
-#include "nvs.h"
-#endif
 #ifdef USE_LOGGER
 #include "esphome/components/logger/logger.h"
 #endif

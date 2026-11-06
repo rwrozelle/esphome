@@ -6,9 +6,6 @@
 #ifdef USE_LOGGER
 #include "esphome/components/logger/logger.h"
 #endif
-#ifdef USE_COAP_OSCORE
-#include "nvs.h"
-#endif
 
 namespace esphome::coap_server {
 
@@ -24,12 +21,8 @@ void CoapServer::setup() {
     return;
   }
   {
-    nvs_handle_t nvs_handle;
     uint32_t stored_threshold = 0;
-    if (nvs_open("coap_oscore", NVS_READONLY, &nvs_handle) == ESP_OK) {
-      nvs_get_u32(nvs_handle, "seq", &stored_threshold);
-      nvs_close(nvs_handle);
-    }
+    oscore_seq_load(&stored_threshold);
     this->oscore_sender_seq_no_ = stored_threshold;
     this->oscore_save_seq_no_();
   }
@@ -360,22 +353,6 @@ static size_t oscore_build_info(uint8_t *buf, size_t buf_len, const uint8_t *id,
   return cbor_encoder_get_buffer_size(&enc, buf);
 }
 
-static bool oscore_hkdf(const uint8_t *secret, size_t secret_len, const uint8_t *salt, size_t salt_len,
-                        const uint8_t *info, size_t info_len, uint8_t *okm, size_t okm_len) {
-  psa_key_derivation_operation_t op = PSA_KEY_DERIVATION_OPERATION_INIT;
-  psa_status_t s = psa_key_derivation_setup(&op, PSA_ALG_HKDF(PSA_ALG_SHA_256));
-  if (s == PSA_SUCCESS && salt_len > 0)
-    s = psa_key_derivation_input_bytes(&op, PSA_KEY_DERIVATION_INPUT_SALT, salt, salt_len);
-  if (s == PSA_SUCCESS)
-    s = psa_key_derivation_input_bytes(&op, PSA_KEY_DERIVATION_INPUT_SECRET, secret, secret_len);
-  if (s == PSA_SUCCESS)
-    s = psa_key_derivation_input_bytes(&op, PSA_KEY_DERIVATION_INPUT_INFO, info, info_len);
-  if (s == PSA_SUCCESS)
-    s = psa_key_derivation_output_bytes(&op, okm, okm_len);
-  psa_key_derivation_abort(&op);
-  return s == PSA_SUCCESS;
-}
-
 bool CoapServer::oscore_derive_keys_() {
   uint8_t info_buf[64];
   size_t info_len;
@@ -385,9 +362,9 @@ bool CoapServer::oscore_derive_keys_() {
   info_len =
       oscore_build_info(info_buf, sizeof(info_buf), this->oscore_sender_id_.data(), this->oscore_sender_id_.size(),
                         this->oscore_id_context_.data(), this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
-  if (info_len == 0 || !oscore_hkdf(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
-                                    this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
-                                    info_len, key_buf, OSCORE_KEY_LEN)) {
+  if (info_len == 0 || !oscore_hkdf_sha256(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
+                                           this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
+                                           info_len, key_buf, OSCORE_KEY_LEN)) {
     ESP_LOGE(TAG, "OSCORE sender key derivation failed");
     return false;
   }
@@ -398,9 +375,9 @@ bool CoapServer::oscore_derive_keys_() {
   info_len = oscore_build_info(info_buf, sizeof(info_buf), this->oscore_recipient_id_.data(),
                                this->oscore_recipient_id_.size(), this->oscore_id_context_.data(),
                                this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
-  if (info_len == 0 || !oscore_hkdf(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
-                                    this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
-                                    info_len, key_buf, OSCORE_KEY_LEN)) {
+  if (info_len == 0 || !oscore_hkdf_sha256(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
+                                           this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
+                                           info_len, key_buf, OSCORE_KEY_LEN)) {
     ESP_LOGE(TAG, "OSCORE recipient key derivation failed");
     return false;
   }
@@ -410,9 +387,9 @@ bool CoapServer::oscore_derive_keys_() {
   // Common IV — stored as raw bytes for nonce construction (not an AEAD key)
   info_len = oscore_build_info(info_buf, sizeof(info_buf), nullptr, 0, this->oscore_id_context_.data(),
                                this->oscore_id_context_.size(), "IV", OSCORE_IV_LEN);
-  if (info_len == 0 || !oscore_hkdf(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
-                                    this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
-                                    info_len, this->oscore_common_iv_, OSCORE_IV_LEN)) {
+  if (info_len == 0 || !oscore_hkdf_sha256(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
+                                           this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
+                                           info_len, this->oscore_common_iv_, OSCORE_IV_LEN)) {
     ESP_LOGE(TAG, "OSCORE common IV derivation failed");
     return false;
   }
@@ -421,7 +398,8 @@ bool CoapServer::oscore_derive_keys_() {
 
   // Retain sender ID (needed for notification OSCORE option) then release all key material.
   this->oscore_sender_id_len_ = (uint8_t) std::min(this->oscore_sender_id_.size(), sizeof(this->oscore_sender_id_buf_));
-  memcpy(this->oscore_sender_id_buf_, this->oscore_sender_id_.data(), this->oscore_sender_id_len_);
+  if (this->oscore_sender_id_len_ > 0)  // an empty Sender ID is valid, and its data() may be null
+    memcpy(this->oscore_sender_id_buf_, this->oscore_sender_id_.data(), this->oscore_sender_id_len_);
 
   this->oscore_master_secret_.clear();
   this->oscore_master_secret_.shrink_to_fit();
@@ -544,28 +522,10 @@ size_t CoapServer::oscore_protect_response_(const uint8_t *inner, size_t inner_l
   if (aad_len == 0)
     return 0;
 
-  // Encrypt — import transient key, use once, destroy immediately
   size_t out_len = 0;
-  {
-    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
-    psa_set_key_bits(&attrs, 128);
-    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_ENCRYPT);
-    psa_set_key_algorithm(&attrs, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN));
-    psa_key_id_t key_id = PSA_KEY_ID_NULL;
-    psa_status_t s = psa_import_key(&attrs, this->oscore_sender_key_, OSCORE_KEY_LEN, &key_id);
-    if (s != PSA_SUCCESS) {
-      ESP_LOGE(TAG, "OSCORE: sender key import failed: %d", (int) s);
-      return 0;
-    }
-    s = psa_aead_encrypt(key_id, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN), nonce, OSCORE_IV_LEN,
-                         aad_buf, aad_len, inner, inner_len, out_buf, out_buf_len, &out_len);
-    psa_destroy_key(key_id);
-    if (s != PSA_SUCCESS) {
-      ESP_LOGE(TAG, "OSCORE: encryption failed: %d", (int) s);
-      return 0;
-    }
-  }
+  if (!oscore_aes_ccm_encrypt(this->oscore_sender_key_, nonce, aad_buf, aad_len, inner, inner_len, out_buf, out_buf_len,
+                              &out_len))
+    return 0;
   ESP_LOGV(TAG, "OSCORE: response encrypted (%s ciphertext=%u bytes)",
            is_notification ? LOG_STR_LITERAL("notification") : LOG_STR_LITERAL("reply"), (unsigned) out_len);
   return out_len;
@@ -633,26 +593,9 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
   }
 
   size_t out_len = 0;
-  {
-    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
-    psa_set_key_bits(&attrs, 128);
-    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_DECRYPT);
-    psa_set_key_algorithm(&attrs, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN));
-    psa_key_id_t key_id = PSA_KEY_ID_NULL;
-    psa_status_t s = psa_import_key(&attrs, this->oscore_recipient_key_, OSCORE_KEY_LEN, &key_id);
-    if (s != PSA_SUCCESS) {
-      ESP_LOGE(TAG, "OSCORE: recipient key import failed: %d", (int) s);
-      return false;
-    }
-    s = psa_aead_decrypt(key_id, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_TAG_LEN), nonce, OSCORE_IV_LEN,
-                         aad_buf, aad_len, ciphertext, ciphertext_len, plaintext, plaintext_buf_len, &out_len);
-    psa_destroy_key(key_id);
-    if (s != PSA_SUCCESS) {
-      ESP_LOGW(TAG, "OSCORE: decryption failed: %d", (int) s);
-      return false;
-    }
-  }
+  if (!oscore_aes_ccm_decrypt(this->oscore_recipient_key_, nonce, aad_buf, aad_len, ciphertext, ciphertext_len,
+                              plaintext, plaintext_buf_len, &out_len))
+    return false;
 
   if (piv_len > 0) {
     if (this->oscore_replay_mask_ == 0 || seq > this->oscore_replay_top_) {
@@ -688,14 +631,8 @@ void CoapServer::oscore_save_seq_no_() {
              this->oscore_sender_seq_no_, (uint32_t) UINT32_MAX);
   }
   const uint32_t threshold = this->oscore_sender_seq_no_ + OSCORE_SEQ_INTERVAL;
-  nvs_handle_t handle;
-  bool ok = nvs_open("coap_oscore", NVS_READWRITE, &handle) == ESP_OK;
-  if (ok) {
-    ok = nvs_set_u32(handle, "seq", threshold) == ESP_OK && nvs_commit(handle) == ESP_OK;
-    nvs_close(handle);
-  }
   // Keeping the old threshold retries the save on the next notification
-  if (this->status_comm_result(ok, LOG_STR("OSCORE sequence number save failed")))
+  if (this->status_comm_result(oscore_seq_save(threshold), LOG_STR("OSCORE sequence number save failed")))
     this->oscore_seq_threshold_ = threshold;
 }
 

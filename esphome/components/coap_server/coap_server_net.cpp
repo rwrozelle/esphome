@@ -3,10 +3,6 @@
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "cbor.h"
-#ifdef USE_COAP_OSCORE
-#include "nvs.h"
-#include <psa/crypto.h>
-#endif
 #ifdef USE_LOGGER
 #include "esphome/components/logger/logger.h"
 #endif

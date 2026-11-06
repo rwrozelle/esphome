@@ -1,0 +1,4 @@
+packages:
+  coap_server: !include common.yaml
+
+socket:

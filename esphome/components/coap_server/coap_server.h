@@ -28,8 +28,8 @@ static constexpr otError OT_ERROR_INVALID_ARGS = 7;
 #endif  // !USE_OPENTHREAD
 
 #ifdef USE_COAP_OSCORE
-#include <psa/crypto.h>
 #include <vector>
+#include "oscore_backend.h"
 #endif
 
 namespace esphome::coap_server {
@@ -337,9 +337,9 @@ class CoapServer : public Component {
   std::vector<uint8_t> oscore_recipient_id_;
   std::vector<uint8_t> oscore_id_context_;
 
-  static constexpr size_t OSCORE_KEY_LEN = 16;
-  static constexpr size_t OSCORE_IV_LEN = 13;
-  static constexpr size_t OSCORE_TAG_LEN = 8;
+  static constexpr size_t OSCORE_KEY_LEN = OSCORE_AES_KEY_LEN;
+  static constexpr size_t OSCORE_IV_LEN = OSCORE_AES_NONCE_LEN;
+  static constexpr size_t OSCORE_TAG_LEN = OSCORE_AES_TAG_LEN;
 
   // Raw derived key bytes — imported as transient PSA keys per operation
   uint8_t oscore_sender_key_[OSCORE_KEY_LEN]{};

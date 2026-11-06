@@ -14,6 +14,8 @@ from esphome.const import (
 )
 from esphome.core import CORE
 import esphome.final_validate as fv
+from esphome.helpers import IS_MACOS
+from esphome.types import ConfigType
 
 from .const import (
     CONF_CLIENT_PING_INTERVAL,
@@ -40,6 +42,15 @@ coap_server_ns = cg.esphome_ns.namespace("coap_server")
 CoapServer = coap_server_ns.class_("CoapServer", cg.Component)
 CoapServerOT = coap_server_ns.class_("CoapServerOT", CoapServer)
 CoapServerNet = coap_server_ns.class_("CoapServerNet", CoapServer)
+
+
+def add_host_openssl() -> None:
+    """Link OpenSSL, which provides the OSCORE crypto on the host platform."""
+    if IS_MACOS:
+        # Homebrew OpenSSL
+        cg.add_build_flag("-I/opt/homebrew/opt/openssl/include")
+        cg.add_build_flag("-L/opt/homebrew/opt/openssl/lib")
+    cg.add_build_flag("-lcrypto")
 
 
 def _hex_bytes(value):
@@ -157,9 +168,11 @@ def _validate_transport(config):
     return config
 
 
-def _validate_host(config):
-    if CORE.is_host and CONF_OSCORE in config:
-        raise cv.Invalid("'oscore' is not supported on the host platform")
+def _validate_oscore_platform(config: ConfigType) -> ConfigType:
+    if CONF_OSCORE in config and not (CORE.is_esp32 or CORE.is_host):
+        raise cv.Invalid(
+            f"'{CONF_OSCORE}' is only supported on ESP32 and host", path=[CONF_OSCORE]
+        )
     return config
 
 
@@ -207,7 +220,7 @@ CONFIG_SCHEMA = cv.All(
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_subscription_mode,
     _validate_transport,
-    _validate_host,
+    _validate_oscore_platform,
 )
 
 
@@ -260,6 +273,8 @@ async def to_code(config):
         if CORE.is_esp32:
             # OSCORE encrypts with AES-CCM
             require_mbedtls_tls_extras({"CONFIG_MBEDTLS_CCM_C"})
+        elif CORE.is_host:
+            add_host_openssl()
         cg.add(
             var.set_oscore_master_secret(_hex_to_bytes_list(oscore[CONF_MASTER_SECRET]))
         )
