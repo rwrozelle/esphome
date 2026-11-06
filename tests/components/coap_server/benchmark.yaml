@@ -1,0 +1,7 @@
+# Turns on USE_DEVICES so the ;dv= link-format attribute is compiled in.
+# Plain yaml.safe_load, no ESPHome tags.
+esphome:
+  devices:
+    - id: coap_test_device
+      name: CoAP Test Device
+      relation: child
