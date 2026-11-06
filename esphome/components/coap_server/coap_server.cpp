@@ -687,15 +687,16 @@ void CoapServer::oscore_save_seq_no_() {
     ESP_LOGW(TAG, "OSCORE: sender sequence number approaching exhaustion (%" PRIu32 " / %" PRIu32 ")",
              this->oscore_sender_seq_no_, (uint32_t) UINT32_MAX);
   }
+  const uint32_t threshold = this->oscore_sender_seq_no_ + OSCORE_SEQ_INTERVAL;
   nvs_handle_t handle;
-  if (nvs_open("coap_oscore", NVS_READWRITE, &handle) != ESP_OK) {
-    ESP_LOGE(TAG, "OSCORE: failed to open NVS for sequence number save");
-    return;
+  bool ok = nvs_open("coap_oscore", NVS_READWRITE, &handle) == ESP_OK;
+  if (ok) {
+    ok = nvs_set_u32(handle, "seq", threshold) == ESP_OK && nvs_commit(handle) == ESP_OK;
+    nvs_close(handle);
   }
-  this->oscore_seq_threshold_ = this->oscore_sender_seq_no_ + OSCORE_SEQ_INTERVAL;
-  nvs_set_u32(handle, "seq", this->oscore_seq_threshold_);
-  nvs_commit(handle);
-  nvs_close(handle);
+  // Keeping the old threshold retries the save on the next notification
+  if (this->status_comm_result(ok, LOG_STR("OSCORE sequence number save failed")))
+    this->oscore_seq_threshold_ = threshold;
 }
 
 void CoapServer::oscore_increment_seq_no_() {
