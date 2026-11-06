@@ -1083,7 +1083,7 @@ bool CoapServerNet::oscore_unprotect_request_(const CoapPacket &pkt, const NetCo
   *plaintext_len = 0;
   if (resource->oscore_exempt)
     return true;
-  if (pkt.oscore_opt_len == 0 && pkt.code != 0x05 /* FETCH */) {
+  if (pkt.oscore_opt_len == 0) {
     ESP_LOGW(TAG, "OSCORE: request on protected resource /%s without OSCORE option", resource->path);
     return false;
   }

@@ -349,6 +349,20 @@ TEST_F(OscoreTest, UnprotectRejectsTamperedCiphertext) {
                                     &plain_len, &req));
 }
 
+// Without a Partial IV there is no replay check, so such a request could be replayed forever
+TEST_F(OscoreTest, UnprotectRejectsRequestWithoutPiv) {
+  const uint8_t opt[] = {0x00};
+  const uint8_t inner[] = {0x02, 0xFF, 0xA1, 0x04, 0xF5};
+  uint8_t ciphertext[256];
+  size_t cipher_len = 0;
+  ASSERT_TRUE(client_encrypt(this->srv_, NO_BYTES, 0, inner, sizeof(inner), ciphertext, &cipher_len));
+  uint8_t plain[256];
+  size_t plain_len = 0;
+  CoapServer::OscoreRequestInfo req{};
+  EXPECT_FALSE(this->srv_.unprotect(opt, sizeof(opt), ciphertext, (uint16_t) cipher_len, plain, sizeof(plain),
+                                    &plain_len, &req));
+}
+
 // PIV lengths 6 and 7 are reserved and used to overflow the 5-byte PIV buffer
 TEST_F(OscoreTest, UnprotectRejectsReservedPivLength) {
   const uint8_t opt[] = {0x07, 1, 2, 3, 4, 5, 6, 7};

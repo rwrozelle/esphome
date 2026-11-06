@@ -544,14 +544,17 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
     ESP_LOGW(TAG, "OSCORE: reserved PIV length %u", piv_len);
     return false;
   }
-  if (piv_len > 0) {
-    if (pos + piv_len > opt_len) {
-      ESP_LOGW(TAG, "OSCORE: PIV overflow pos=%u piv_len=%u opt_len=%u", pos, piv_len, opt_len);
-      return false;
-    }
-    memcpy(req_info->piv, opt_val + pos, piv_len);
-    pos += piv_len;
+  // Every request carries a Partial IV (RFC 8613 §6.1); without one there is nothing to check replays against
+  if (piv_len == 0) {
+    ESP_LOGW(TAG, "OSCORE: request without Partial IV");
+    return false;
   }
+  if (pos + piv_len > opt_len) {
+    ESP_LOGW(TAG, "OSCORE: PIV overflow pos=%u piv_len=%u opt_len=%u", pos, piv_len, opt_len);
+    return false;
+  }
+  memcpy(req_info->piv, opt_val + pos, piv_len);
+  pos += piv_len;
   req_info->piv_len = piv_len;
   if (has_kid_ctx) {
     if (pos >= opt_len) {
@@ -573,7 +576,7 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
   uint32_t seq = 0;
   for (uint8_t i = 0; i < piv_len; i++)
     seq = (seq << 8) | req_info->piv[i];
-  if (piv_len > 0 && this->oscore_replay_mask_ != 0) {
+  if (this->oscore_replay_mask_ != 0) {
     if (seq <= this->oscore_replay_top_) {
       uint32_t offset = this->oscore_replay_top_ - seq;
       if (offset >= 64 || (this->oscore_replay_mask_ & (1ULL << offset))) {
@@ -597,18 +600,16 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
                               plaintext, plaintext_buf_len, &out_len))
     return false;
 
-  if (piv_len > 0) {
-    if (this->oscore_replay_mask_ == 0 || seq > this->oscore_replay_top_) {
-      if (this->oscore_replay_mask_ != 0) {
-        uint32_t shift = seq - this->oscore_replay_top_;
-        this->oscore_replay_mask_ = (shift < 64) ? (this->oscore_replay_mask_ << shift) : 0;
-      }
-      this->oscore_replay_top_ = seq;
-      this->oscore_replay_mask_ |= 1ULL;
-    } else {
-      uint32_t offset = this->oscore_replay_top_ - seq;
-      this->oscore_replay_mask_ |= (1ULL << offset);
+  if (this->oscore_replay_mask_ == 0 || seq > this->oscore_replay_top_) {
+    if (this->oscore_replay_mask_ != 0) {
+      uint32_t shift = seq - this->oscore_replay_top_;
+      this->oscore_replay_mask_ = (shift < 64) ? (this->oscore_replay_mask_ << shift) : 0;
     }
+    this->oscore_replay_top_ = seq;
+    this->oscore_replay_mask_ |= 1ULL;
+  } else {
+    uint32_t offset = this->oscore_replay_top_ - seq;
+    this->oscore_replay_mask_ |= (1ULL << offset);
   }
   *plaintext_len = out_len;
   ESP_LOGV(TAG, "OSCORE: request decrypted (seq=%" PRIu32 " plaintext=%u bytes)", seq, (unsigned) out_len);
