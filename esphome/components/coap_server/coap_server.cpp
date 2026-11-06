@@ -902,6 +902,7 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
       put(dv_buf, dv_len);
     }
 #endif
+#ifdef USE_SENSOR
     if (res.type == ENTITYTYPE_SENSOR) {
       const auto uom_ref = res.entity->get_unit_of_measurement_ref();
       if (!uom_ref.empty()) {
@@ -914,6 +915,7 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
                                         static_cast<sensor::Sensor *>(res.entity)->get_accuracy_decimals());
       put(ad_buf, ad_len);
     }
+#endif
     if (res.type == ENTITYTYPE_SENSOR || res.type == ENTITYTYPE_TEXT_SENSOR || res.type == ENTITYTYPE_NUMBER) {
       char dc_buf[MAX_DEVICE_CLASS_LENGTH];
       const char *dc = res.entity->get_device_class_to(dc_buf);
