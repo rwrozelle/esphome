@@ -477,6 +477,8 @@ TEST_F(OscoreTest, ProtectedPostIsAppliedAndAnsweredEncrypted) {
                                    reply.size(), plain, &plain_len));
   ASSERT_GE(plain_len, 4u);
   EXPECT_EQ(plain[0], 0x44u);  // inner code 2.04
+  EXPECT_EQ(plain[1], 0xC1u);  // Content-Format, 1 byte
+  EXPECT_EQ(plain[2], 60u);    // application/cbor
   const uint8_t state[] = {0xA1, 0x04, 0xF5};
   EXPECT_EQ(std::vector<uint8_t>(plain + plain_len - sizeof(state), plain + plain_len),
             std::vector<uint8_t>(state, state + sizeof(state)));

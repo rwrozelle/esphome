@@ -379,7 +379,7 @@ class CoapServer : public Component {
                               uint16_t ciphertext_len, uint8_t *plaintext, size_t plaintext_buf_len,
                               size_t *plaintext_len, OscoreRequestInfo *req_info);
 
-  // Builds the OSCORE inner plaintext: [code][0xC1=CF-opt][0x32=cbor][0xFF][payload].
+  // Builds the OSCORE inner plaintext: [code][0xC1=CF-opt][60=cbor][0xFF][payload].
   // Returns total byte count (4 + payload_len). Both transports use this before oscore_protect_response_.
   static size_t oscore_build_inner_cbor(uint8_t code, const uint8_t *payload, size_t payload_len, uint8_t *out);
   // Builds the OSCORE option for outgoing notifications: flags + PIV bytes + sender KID.

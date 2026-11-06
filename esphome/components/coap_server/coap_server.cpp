@@ -620,7 +620,7 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
 size_t CoapServer::oscore_build_inner_cbor(uint8_t code, const uint8_t *payload, size_t payload_len, uint8_t *out) {
   out[0] = code;
   out[1] = 0xC1;  // Content-Format option: delta=12, len=1
-  out[2] = 0x32;  // value=50 (application/cbor)
+  out[2] = 60;    // application/cbor
   out[3] = 0xFF;  // payload marker
   memcpy(out + 4, payload, payload_len);
   return 4 + payload_len;
