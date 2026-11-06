@@ -1,0 +1,10 @@
+# IPv4 only: builds the #else branches of USE_NETWORK_IPV6 in coap_server_net.cpp
+packages:
+  coap_server: !include common.yaml
+
+network:
+  enable_ipv6: false
+
+wifi:
+  ssid: "test"
+  password: "testpassword"
