@@ -23,8 +23,7 @@ static CoapServer::BlockwiseSource make_source(const uint8_t *data, size_t len, 
 static uint16_t call_hook(CoapServer::BlockwiseSource *src, uint32_t position, uint8_t *out, uint16_t max_len,
                           bool *more) {
   uint16_t len = max_len;
-  otError err = CoapServer::blockwise_transmit_hook(src, out, position, &len, more);
-  return (err == OT_ERROR_NONE) ? len : 0;
+  return CoapServer::blockwise_transmit_hook(src, out, position, &len, more) ? len : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,8 +67,7 @@ TEST(BlockwiseSource, PositionBeyondEnd_InvalidArgs) {
   uint8_t out[256];
   bool more = false;
   uint16_t block_len = sizeof(out);
-  otError err = CoapServer::blockwise_transmit_hook(&src, out, 10, &block_len, &more);
-  EXPECT_EQ(err, OT_ERROR_INVALID_ARGS);
+  EXPECT_FALSE(CoapServer::blockwise_transmit_hook(&src, out, 10, &block_len, &more));
 }
 
 TEST(BlockwiseSource, PartialLastBlock_CorrectLength) {
@@ -119,17 +117,17 @@ struct ReadFnCtx {
   bool called{false};
 };
 
-static otError test_read_fn(void *ctx, uint8_t *buf, uint32_t pos, uint16_t *len, bool *more) {
+static bool test_read_fn(void *ctx, uint8_t *buf, uint32_t pos, uint16_t *len, bool *more) {
   auto *c = static_cast<ReadFnCtx *>(ctx);
   c->called = true;
   if (pos >= c->data_len)
-    return OT_ERROR_INVALID_ARGS;
+    return false;
   size_t avail = c->data_len - pos;
   uint16_t n = (uint16_t) std::min((size_t) *len, avail);
   memcpy(buf, c->data + pos, n);
   *len = n;
   *more = (pos + n) < c->data_len;
-  return OT_ERROR_NONE;
+  return true;
 }
 
 TEST(BlockwiseSource, ReadFn_Dispatches) {
@@ -143,9 +141,9 @@ TEST(BlockwiseSource, ReadFn_Dispatches) {
   uint8_t out[256];
   bool more = true;
   uint16_t len = sizeof(out);
-  otError err = CoapServer::blockwise_transmit_hook(&src, out, 0, &len, &more);
+  bool ok = CoapServer::blockwise_transmit_hook(&src, out, 0, &len, &more);
 
-  EXPECT_EQ(err, OT_ERROR_NONE);
+  EXPECT_TRUE(ok);
   EXPECT_TRUE(ctx.called);
   EXPECT_EQ(len, 3u);
   EXPECT_FALSE(more);

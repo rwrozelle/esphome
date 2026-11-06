@@ -6,26 +6,11 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/util.h"
 #include <array>
-#include <cassert>
 #include <memory>
 
-#if defined(USE_LOGGER) || defined(USE_OPENTHREAD)
+#ifdef USE_LOGGER
 #include <mutex>
 #endif
-
-#ifdef USE_OPENTHREAD
-#include <openthread/coap.h>
-#else  // !USE_OPENTHREAD
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include "esphome/components/socket/socket.h"
-// Minimal otError shim so BlockwiseSource / blockwise_transmit_hook compile
-// in the Net transport path without pulling in the full OpenThread headers.
-typedef int otError;
-static constexpr otError OT_ERROR_NONE = 0;
-static constexpr otError OT_ERROR_INVALID_ARGS = 7;
-#endif  // !USE_OPENTHREAD
 
 #ifdef USE_COAP_OSCORE
 #include <vector>
@@ -108,34 +93,6 @@ struct CoapClientBase {
   bool has_non_observer{false};
   bool boot_notified{false};
 };
-
-#ifdef USE_OPENTHREAD
-
-class CoapServerOT;
-
-template<typename ObjectType> void ClearAllBytes(ObjectType &aObject) {
-  memset(reinterpret_cast<void *>(&aObject), 0, sizeof(ObjectType));
-}
-
-// otCoapResource must be first so implicit ehCoapResource* → otCoapResource* needs no pointer adjustment.
-struct ehCoapResource : otCoapResource, CoapResourceBase {
-  CoapServerOT *server{nullptr};
-};
-
-struct ehCoapClient : CoapClientBase {
-  otIp6Address peer_addr;
-  uint16_t peer_port{0};
-};
-
-struct ehCoapObserver : CoapObserverBase {
-  ehCoapObserver *next{nullptr};
-  ehCoapResource *resource{nullptr};
-  otMessageInfo message_info;
-  otCoapToken coap_token;
-  otCoapType obs_type{OT_COAP_TYPE_NON_CONFIRMABLE};
-};
-
-#endif  // USE_OPENTHREAD
 
 // Abstract base — transport-agnostic logic, OSCORE crypto, Controller entity dispatch
 class CoapServer : public Component {
@@ -256,15 +213,14 @@ class CoapServer : public Component {
     const uint8_t *data{nullptr};
     size_t data_len{0};
     uint16_t content_format{40};
-    otError (*read_fn)(void *ctx, uint8_t *buf, uint32_t pos, uint16_t *len, bool *more){nullptr};
+    bool (*read_fn)(void *ctx, uint8_t *buf, uint32_t pos, uint16_t *len, bool *more){nullptr};
     void *read_ctx{nullptr};
   };
 
-  // OT-compatible transmit hook: fills block_buf from src at position,
-  // updates *block_length to bytes written, sets *more. Used directly by
-  // otCoapSendResponseBlockWise and by the Net transport's manual Block2 logic.
-  static otError blockwise_transmit_hook(void *ctx, uint8_t *block_buf, uint32_t position, uint16_t *block_length,
-                                         bool *more);
+  // Fills block_buf from the BlockwiseSource ctx at position, sets *block_length to the bytes written and
+  // *more. Returns false when position is past the end. The OpenThread transport wraps it as its transmit hook.
+  static bool blockwise_transmit_hook(void *ctx, uint8_t *block_buf, uint32_t position, uint16_t *block_length,
+                                      bool *more);
 
  protected:
   // Pure virtual — each transport subclass implements entity-state notification
@@ -387,298 +343,6 @@ class CoapServer : public Component {
   uint8_t oscore_build_notify_option_(uint8_t *opt_buf);
 #endif  // USE_COAP_OSCORE
 };
-
-#ifdef USE_OPENTHREAD
-// OpenThread transport — uses otInstance, otCoapResource, observer linked list
-class CoapServerOT : public CoapServer {
- public:
-  void setup() override;
-  bool teardown() override;
-  void dump_config() override;
-
-  static void handle_well_known_core(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  static void handle_notification_ack(void *context, otMessage *message, const otMessageInfo *message_info,
-                                      otError error);
-  static void handle_info_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  static void handle_ping_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  static void handle_entity_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  void handle_entity_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info,
-                             const EntityType type);
-
-#ifdef USE_BUTTON
-  static void handle_button_request(void *aContext, otMessage *message, const otMessageInfo *messageInfo);
-  void handle_button_request(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info);
-#endif
-#ifdef USE_LOGGER
-  static void handle_logs_request(void *context, otMessage *message, const otMessageInfo *message_info);
-#endif  // USE_LOGGER
-
-  void shrink_observers();
-  void republish_all();
-
- protected:
-  void on_entity_update(EntityBase *entity) override;
-
-  void add_coap_resource_(EntityType type, EntityBase *entity, bool observable, uint16_t &senml_index);
-  void notify_observers_(ehCoapResource *resource, const uint8_t *payload, size_t payload_len);
-  void handle_observer_(ehCoapObserver *observer, ehCoapResource *expected_resource, const uint8_t *payload,
-                        size_t payload_len);
-  ehCoapClient *new_client_(const otMessageInfo &message_info);
-  ehCoapClient *find_client_(const otIp6Address &addr);
-  void touch_client_(const otMessageInfo &message_info);
-  void free_client_(ehCoapClient *client);
-  void ping_client_(ehCoapClient *client);
-  void cancel_ping_client_(ehCoapClient *client);
-  uint8_t observe_(otMessage *message);
-  ehCoapObserver *get_observer_(otMessage *message, const otMessageInfo *message_info);
-  ehCoapObserver *new_observer_(ehCoapResource *resource, const otMessageInfo &message_info, const otCoapToken &token,
-                                otCoapType obs_type);
-  void free_observer_(ehCoapObserver *observer);
-
-#ifdef USE_LOGGER
-  void flush_logs_();
-  void on_log(uint8_t level, const char *tag, const char *message, size_t message_len);
-  ehCoapResource *logs_resource_{nullptr};
-#endif  // USE_LOGGER
-
-  // Careful: use only inside CoAP callbacks (OpenThread task context)
-  otInstance *instance_;
-
-  // Block-wise source for .well-known/core responses; refreshed each handler call.
-  // Lives as a member so the ctx pointer given to OT remains valid across block requests.
-  BlockwiseSource wk_source_;
-
-  // Transmit-hook wrapper for blocks 1+: receives CoapServerOT* ctx, delegates to
-  // CoapServer::blockwise_transmit_hook(&self->wk_source_, ...).
-  static otError wk_blockwise_transmit_hook(void *ctx, uint8_t *block, uint32_t pos, uint16_t *len, bool *more);
-
-  // Block-wise resource registration for .well-known/core (otCoapAddBlockWiseResource).
-  otCoapBlockwiseResource wk_bw_resource_{};
-
-  ehCoapResource ping_resource_;
-  esphome::FixedVector<ehCoapResource> resources_;
-  std::array<ehCoapClient, USE_COAP_SERVER_MAX_CLIENTS> active_clients_{};
-  ehCoapObserver *active_observers_{nullptr};
-  ehCoapObserver *free_observers_{nullptr};
-  uint8_t active_count_{0};
-  uint8_t high_water_mark_{0};
-  mutable std::mutex lock_;
-
-#ifdef USE_COAP_OSCORE
-  // Returns false and sends 4.01 if the request must be OSCORE-protected but isn't.
-  // On success fills plaintext/plaintext_len (inner CoAP bytes) and req_info.
-  // If resource is oscore_exempt, plaintext is left empty and returns true immediately.
-  bool oscore_unprotect_request_(otMessage *message, const ehCoapResource *resource, uint8_t *plaintext,
-                                 size_t plaintext_buf_len, size_t *plaintext_len, OscoreRequestInfo *req_info);
-#endif  // USE_COAP_OSCORE
-};
-#else  // NOT USE_OPENTHREAD
-
-// ---------------------------------------------------------------------------
-// IP/UDP transport — WiFi, Ethernet, Modem
-// ---------------------------------------------------------------------------
-
-using NetCoapResource = CoapResourceBase;
-
-struct NetCoapClient : CoapClientBase {
-  sockaddr_storage peer_addr{};
-};
-
-struct NetCoapObserver : CoapObserverBase {
-  NetCoapObserver *next{nullptr};
-  NetCoapResource *resource{nullptr};
-  sockaddr_storage peer_addr{};
-  uint8_t token[8]{};
-  uint8_t token_len{0};
-  bool is_con{false};
-  uint16_t con_msg_id{0};  // msg_id of the last CON notification sent
-};
-
-// CoAP response builder — fits an IPv6 minimum-MTU datagram (1280 bytes).
-// Kept as a class member of CoapServerNet to avoid a 1280-byte stack allocation per handler call.
-struct CoapBuilder {
-  uint8_t buf[1280];
-  size_t pos{0};
-  uint16_t last_opt{0};
-
-  void begin(uint8_t type, uint8_t code, uint16_t msg_id, const uint8_t *token, uint8_t token_len) {
-    buf[0] = (uint8_t) (0x40 | ((type & 3) << 4) | (token_len & 0x0F));
-    buf[1] = code;
-    buf[2] = (uint8_t) (msg_id >> 8);
-    buf[3] = (uint8_t) (msg_id & 0xFF);
-    pos = 4;
-    if (token_len > 0 && token != nullptr) {
-      memcpy(buf + 4, token, token_len);
-      pos += token_len;
-    }
-    last_opt = 0;
-  }
-
-  void option(uint16_t opt_num, const uint8_t *value, uint16_t value_len) {
-    uint16_t delta = opt_num - last_opt;
-    last_opt = opt_num;
-    uint8_t delta4;
-    uint8_t ext[2];
-    uint8_t ext_len = 0;
-    if (delta < 13) {
-      delta4 = (uint8_t) delta;
-    } else if (delta < 269) {
-      delta4 = 13;
-      ext[ext_len++] = (uint8_t) (delta - 13);
-    } else {
-      delta4 = 14;
-      uint16_t v = delta - 269;
-      ext[ext_len++] = (uint8_t) (v >> 8);
-      ext[ext_len++] = (uint8_t) v;
-    }
-    uint8_t len4;
-    uint8_t lext[2];
-    uint8_t lext_len = 0;
-    if (value_len < 13) {
-      len4 = (uint8_t) value_len;
-    } else if (value_len < 269) {
-      len4 = 13;
-      lext[lext_len++] = (uint8_t) (value_len - 13);
-    } else {
-      len4 = 14;
-      uint16_t v = value_len - 269;
-      lext[lext_len++] = (uint8_t) (v >> 8);
-      lext[lext_len++] = (uint8_t) v;
-    }
-    assert(pos + 1 + ext_len + lext_len + value_len <= sizeof(buf));
-    buf[pos++] = (uint8_t) ((delta4 << 4) | len4);
-    for (uint8_t i = 0; i < ext_len; i++)
-      buf[pos++] = ext[i];
-    for (uint8_t i = 0; i < lext_len; i++)
-      buf[pos++] = lext[i];
-    if (value_len > 0 && value != nullptr) {
-      memcpy(buf + pos, value, value_len);
-      pos += value_len;
-    }
-  }
-
-  void option_uint(uint16_t opt_num, uint32_t value) {
-    uint8_t v[4];
-    uint8_t vlen = 0;
-    if (value > 0xFFFFFF)
-      v[vlen++] = (uint8_t) (value >> 24);
-    if (value > 0xFFFF)
-      v[vlen++] = (uint8_t) (value >> 16);
-    if (value > 0xFF)
-      v[vlen++] = (uint8_t) (value >> 8);
-    if (value > 0)
-      v[vlen++] = (uint8_t) value;
-    option(opt_num, v, vlen);
-  }
-
-  void option_empty(uint16_t opt_num) { option(opt_num, nullptr, 0); }
-
-  void payload_marker() {
-    assert(pos + 1 <= sizeof(buf));
-    buf[pos++] = 0xFF;
-  }
-
-  void append(const uint8_t *data, size_t len) {
-    assert(pos + len <= sizeof(buf));
-    memcpy(buf + pos, data, len);
-    pos += len;
-  }
-};
-
-class CoapServerNet : public CoapServer {
- public:
-  struct CoapPacket {
-    uint8_t type{0};  // 0=CON, 1=NON, 2=ACK, 3=RST
-    uint8_t code{0};
-    uint16_t message_id{0};
-    uint8_t token[8]{};
-    uint8_t token_len{0};
-    bool observe_present{false};
-    uint8_t observe{3};  // 0=register, 1=deregister, 3=absent
-    uint8_t oscore_opt[32]{};
-    uint8_t oscore_opt_len{0};
-    const uint8_t *payload{nullptr};
-    uint16_t payload_len{0};
-    char uri_path[64]{};
-    // RFC 7959 Block2 option (23) — for block-wise GET responses
-    bool block2_present{false};
-    uint32_t block2_num{0};  // block number requested by client
-    uint8_t block2_szx{6};   // size exponent: block_size = 16 << szx (default 1024)
-  };
-
-  static bool parse_coap(const uint8_t *buf, size_t len, CoapPacket *pkt);
-
-  void setup() override;
-  void loop() override;
-  bool teardown() override;
-  void dump_config() override;
-  void republish_all();
-
- protected:
-  void on_entity_update(EntityBase *entity) override;
-
-  void process_datagram_(const uint8_t *buf, size_t len, const sockaddr_storage *peer);
-  virtual void send_response(const uint8_t *buf, size_t len, const sockaddr_storage *peer);
-
-  void handle_well_known_core_(const CoapPacket &pkt, const sockaddr_storage &peer);
-  void handle_info_request_(const CoapPacket &pkt, const sockaddr_storage &peer);
-  void handle_ping_request_(const CoapPacket &pkt, const sockaddr_storage &peer);
-  void handle_entity_request_(const CoapPacket &pkt, const sockaddr_storage &peer, NetCoapResource *resource);
-#ifdef USE_BUTTON
-  void handle_button_request_(const CoapPacket &pkt, const sockaddr_storage &peer, NetCoapResource *resource);
-#endif
-#ifdef USE_LOGGER
-  void handle_logs_request_(const CoapPacket &pkt, const sockaddr_storage &peer);
-  void flush_logs_();
-  void on_log(uint8_t level, const char *tag, const char *message, size_t message_len) override;
-  NetCoapResource *logs_resource_{nullptr};
-#endif
-
-  void handle_con_response_(const CoapPacket &pkt, const sockaddr_storage &peer);
-  void notify_observers_(NetCoapResource *resource, const uint8_t *payload, size_t payload_len);
-  void add_net_resource_(EntityType type, EntityBase *entity, bool observable, uint16_t &senml_index);
-  NetCoapResource *find_resource_(const char *path);
-
-  NetCoapClient *new_client_(const sockaddr_storage &peer);
-  NetCoapClient *find_client_(const sockaddr_storage &peer);
-  void touch_client_(const sockaddr_storage &peer);
-  void free_client_(NetCoapClient *client);
-  void ping_client_(NetCoapClient *client);
-  void cancel_ping_client_(NetCoapClient *client);
-
-  NetCoapObserver *get_observer_(const uint8_t *token, uint8_t token_len, const sockaddr_storage &peer);
-  NetCoapObserver *new_observer_(NetCoapResource *resource, const sockaddr_storage &peer, const uint8_t *token,
-                                 uint8_t token_len, bool is_con);
-  void free_observer_(NetCoapObserver *observer);
-
-#ifdef USE_COAP_OSCORE
-  bool oscore_unprotect_request_(const CoapPacket &pkt, const NetCoapResource *resource, uint8_t *plaintext,
-                                 size_t plaintext_buf_len, size_t *plaintext_len, OscoreRequestInfo *req_info);
-#endif
-
-  std::unique_ptr<socket::Socket> sock_;
-  uint16_t next_msg_id_{static_cast<uint16_t>(random_uint32())};
-  FixedVector<NetCoapResource> resources_;
-  std::array<NetCoapClient, USE_COAP_SERVER_MAX_CLIENTS> active_clients_{};
-  NetCoapObserver *active_observers_{nullptr};
-  NetCoapObserver *free_observers_{nullptr};
-
-  // Moved off the stack to avoid loopTask overflow.
-  // recv_buf_: recvfrom staging buffer (1280 B = IPv6 min MTU).
-  // builder_: reusable response builder; ESPHome main loop is single-threaded so one instance suffices.
-  // cbor_buf_: CBOR output staging; sized to COAP_CBOR_BUF_SIZE (64 B without text_sensor, 256 B with).
-  uint8_t recv_buf_[1280]{};
-  CoapBuilder builder_{};
-  uint8_t cbor_buf_[COAP_CBOR_BUF_SIZE]{};
-#ifdef USE_COAP_OSCORE
-  // oscore_plain_: decrypted inner CoAP bytes for inbound requests (64 B covers all POST payloads).
-  // oscore_inner_/cipher_: staging buffers for outbound OSCORE encryption.
-  uint8_t oscore_plain_[COAP_PAYLOAD_SMALL_SIZE]{};
-  uint8_t oscore_inner_[COAP_CBOR_BUF_SIZE + 8]{};
-  uint8_t oscore_cipher_[COAP_CBOR_BUF_SIZE + 16]{};  // +8 inner overhead + 8 auth tag
-#endif
-};
-#endif  // NOT USE_OPENTHREAD
 
 extern CoapServer *global_coap_server;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 

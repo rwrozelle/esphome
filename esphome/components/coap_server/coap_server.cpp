@@ -59,19 +59,19 @@ void CoapServer::on_valve_update(valve::Valve *entity) { this->on_entity_update(
 #endif
 
 // static
-otError CoapServer::blockwise_transmit_hook(void *ctx, uint8_t *block_buf, uint32_t position, uint16_t *block_length,
-                                            bool *more) {
+bool CoapServer::blockwise_transmit_hook(void *ctx, uint8_t *block_buf, uint32_t position, uint16_t *block_length,
+                                         bool *more) {
   auto *src = static_cast<BlockwiseSource *>(ctx);
   if (src->read_fn != nullptr)
     return src->read_fn(src->read_ctx, block_buf, position, block_length, more);
   if (position >= src->data_len)
-    return OT_ERROR_INVALID_ARGS;
+    return false;
   size_t avail = src->data_len - position;
   uint16_t len = (uint16_t) std::min((size_t) *block_length, avail);
   memcpy(block_buf, src->data + position, len);
   *block_length = len;
   *more = (position + len) < src->data_len;
-  return OT_ERROR_NONE;
+  return true;
 }
 
 // static

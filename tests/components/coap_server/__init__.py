@@ -27,6 +27,7 @@ def override_manifest(manifest: ComponentManifestOverride) -> None:
         for domain in DOMAINS:
             CORE.testing_ensure_platform_registered(domain)
         cg.add_define("USE_COAP_SERVER")
+        cg.add_define("USE_COAP_SERVER_NETWORK")
         cg.add_define("USE_COAP_SERVER_PORT", 5683)
         cg.add_define("USE_COAP_SERVER_MAX_CLIENTS", 4)
         # Same value the socket tests set; the tests use both IPv4 and IPv6 peers

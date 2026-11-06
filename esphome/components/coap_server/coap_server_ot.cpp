@@ -1,5 +1,5 @@
-#include "coap_server.h"
-#ifdef USE_OPENTHREAD
+#include "coap_server_ot.h"
+#ifdef USE_COAP_SERVER_OPENTHREAD
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "esphome/components/openthread/openthread.h"
@@ -243,7 +243,7 @@ void CoapServerOT::handle_well_known_core(void *context, otMessage *message, con
     SuccessOrExit(error = otCoapMessageAppendBlock2Option(response, 0, true, szx));
     SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
     SuccessOrExit(error = otCoapSendResponseBlockWise(instance, response, message_info, &self->wk_source_,
-                                                      &CoapServer::blockwise_transmit_hook));
+                                                      &CoapServerOT::source_transmit_hook));
   } else {
     // No Block2 hint — send inline (payload must fit in one UDP packet).
     SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
@@ -264,7 +264,12 @@ exit:
 // where mContext = CoapServerOT*.  Delegates to CoapServer::blockwise_transmit_hook with &wk_source_.
 otError CoapServerOT::wk_blockwise_transmit_hook(void *ctx, uint8_t *block, uint32_t pos, uint16_t *len, bool *more) {
   CoapServerOT *self = static_cast<CoapServerOT *>(ctx);
-  return CoapServer::blockwise_transmit_hook(&self->wk_source_, block, pos, len, more);
+  return source_transmit_hook(&self->wk_source_, block, pos, len, more);
+}
+
+// static
+otError CoapServerOT::source_transmit_hook(void *ctx, uint8_t *block, uint32_t pos, uint16_t *len, bool *more) {
+  return CoapServer::blockwise_transmit_hook(ctx, block, pos, len, more) ? OT_ERROR_NONE : OT_ERROR_INVALID_ARGS;
 }
 
 // static handler
@@ -1325,4 +1330,4 @@ void CoapServerOT::flush_logs_() {
 #endif  // USE_LOGGER
 
 }  // namespace esphome::coap_server
-#endif  // USE_OPENTHREAD
+#endif  // USE_COAP_SERVER_OPENTHREAD

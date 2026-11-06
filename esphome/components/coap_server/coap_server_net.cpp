@@ -1,5 +1,5 @@
-#include "coap_server.h"
-#ifndef USE_OPENTHREAD
+#include "coap_server_net.h"
+#ifdef USE_COAP_SERVER_NETWORK
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "cbor.h"
@@ -1152,4 +1152,4 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_s
 
 }  // namespace esphome::coap_server
 
-#endif  // NOT USE_OPENTHREAD
+#endif  // USE_COAP_SERVER_NETWORK

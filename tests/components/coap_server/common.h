@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#include "esphome/components/coap_server/coap_server.h"
+#include "esphome/components/coap_server/coap_server_net.h"
 
 namespace esphome::coap_server::testing {
 

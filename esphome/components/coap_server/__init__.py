@@ -4,6 +4,7 @@ from esphome.components import socket as esphome_socket
 from esphome.components.const import CONF_DEVICE_TYPE
 from esphome.components.esp32 import require_mbedtls_tls_extras
 from esphome.components.openthread.const import CONF_POLL_PERIOD
+from esphome.config_helpers import filter_source_files_from_defines
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ID,
@@ -59,6 +60,17 @@ def add_host_openssl() -> None:
         cg.add_build_flag("-I/opt/homebrew/opt/openssl/include")
         cg.add_build_flag("-L/opt/homebrew/opt/openssl/lib")
     cg.add_build_flag("-lcrypto")
+
+
+# Only the configured transport is built
+FILTER_SOURCE_FILES = filter_source_files_from_defines(
+    {
+        "coap_server_net.cpp": "USE_COAP_SERVER_NETWORK",
+        "coap_server_net.h": "USE_COAP_SERVER_NETWORK",
+        "coap_server_ot.cpp": "USE_COAP_SERVER_OPENTHREAD",
+        "coap_server_ot.h": "USE_COAP_SERVER_OPENTHREAD",
+    }
+)
 
 
 def _hex_bytes(value):
@@ -242,6 +254,7 @@ async def to_code(config):
 
     id_ = config[CONF_ID].copy()
     id_.type = CoapServerOT if use_ot else CoapServerNet
+    cg.add_define("USE_COAP_SERVER_OPENTHREAD" if use_ot else "USE_COAP_SERVER_NETWORK")
     var = cg.new_Pvariable(id_)
 
     await cg.register_component(var, config)
