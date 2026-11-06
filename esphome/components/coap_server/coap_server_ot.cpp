@@ -25,6 +25,7 @@
 namespace esphome::coap_server {
 
 ESPHOME_LOG_TAG(TAG, "coap_server");
+static constexpr uint32_t PING_TIMEOUT_ID_BASE = 0;
 
 // Determine the response type from the type of request CON or NON
 static otCoapType response_type(otMessage *request) {
@@ -990,10 +991,7 @@ ehCoapClient *CoapServerOT::new_client_(const otMessageInfo &message_info) {
 }
 
 void CoapServerOT::ping_client_(ehCoapClient *client) {
-  static_assert(USE_COAP_SERVER_MAX_CLIENTS <= 9, "client_ping key assumes single-digit slot");
-  char key[] = "client_ping_0";
-  key[sizeof("client_ping_") - 1] = '0' + client->slot;
-  this->set_timeout(key, this->client_ping_interval_ms_, [this, client]() {
+  this->set_timeout(PING_TIMEOUT_ID_BASE + client->slot, this->client_ping_interval_ms_, [this, client]() {
     if (!client->active)
       return;
     uint32_t now = millis();
@@ -1057,9 +1055,7 @@ void CoapServerOT::ping_client_(ehCoapClient *client) {
 }
 
 void CoapServerOT::cancel_ping_client_(ehCoapClient *client) {
-  char key[] = "client_ping_0";
-  key[sizeof("client_ping_") - 1] = '0' + client->slot;
-  this->cancel_timeout(key);
+  this->cancel_timeout(PING_TIMEOUT_ID_BASE + client->slot);
 }
 
 ehCoapClient *CoapServerOT::find_client_(const otIp6Address &addr) {

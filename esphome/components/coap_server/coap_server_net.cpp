@@ -14,6 +14,7 @@
 namespace esphome::coap_server {
 
 ESPHOME_LOG_TAG(TAG, "coap_server");
+static constexpr uint32_t PING_TIMEOUT_ID_BASE = 0;
 static const size_t ADDR_STR_LEN = 46;  // large enough for IPv4 and IPv6 (INET6_ADDRSTRLEN)
 
 // Response type: CON(0)→ACK(2), NON(1)→NON(1)
@@ -982,9 +983,7 @@ void CoapServerNet::free_client_(NetCoapClient *client) {
 }
 
 void CoapServerNet::ping_client_(NetCoapClient *client) {
-  char key[] = "net_ping_0";
-  key[sizeof("net_ping_") - 1] = '0' + client->slot;
-  this->set_timeout(key, this->client_ping_interval_ms_, [this, client]() {
+  this->set_timeout(PING_TIMEOUT_ID_BASE + client->slot, this->client_ping_interval_ms_, [this, client]() {
     if (!client->active)
       return;
     uint32_t now = millis();
@@ -1011,9 +1010,7 @@ void CoapServerNet::ping_client_(NetCoapClient *client) {
 }
 
 void CoapServerNet::cancel_ping_client_(NetCoapClient *client) {
-  char key[] = "net_ping_0";
-  key[sizeof("net_ping_") - 1] = '0' + client->slot;
-  this->cancel_timeout(key);
+  this->cancel_timeout(PING_TIMEOUT_ID_BASE + client->slot);
 }
 
 // ---------------------------------------------------------------------------
