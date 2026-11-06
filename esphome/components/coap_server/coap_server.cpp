@@ -437,6 +437,16 @@ bool CoapServer::oscore_derive_keys_() {
   return true;
 }
 
+// static
+uint8_t CoapServer::oscore_encode_piv(uint32_t seq, uint8_t *piv) {
+  uint8_t len = 1;
+  while (len < sizeof(seq) && (seq >> (8 * len)) != 0)
+    len++;
+  for (uint8_t i = 0; i < len; i++)
+    piv[i] = (uint8_t) (seq >> (8 * (len - 1 - i)));
+  return len;
+}
+
 // Nonce = [kid_len(1) | padded_kid(nonce_len-6) | padded_piv(5)] XOR common_iv
 void CoapServer::oscore_build_nonce(const uint8_t *piv, uint8_t piv_len, const uint8_t *kid, uint8_t kid_len,
                                     const uint8_t *common_iv, uint8_t nonce[OSCORE_IV_LEN]) {
@@ -513,21 +523,7 @@ size_t CoapServer::oscore_protect_response_(const uint8_t *inner, size_t inner_l
       this->mark_failed();
       return 0;
     }
-    // Use server's sequence number as PIV; encode as minimal big-endian bytes
-    uint32_t seq = this->oscore_sender_seq_no_;
-    if (seq <= 0xFF) {
-      piv[0] = (uint8_t) seq;
-      piv_len = 1;
-    } else if (seq <= 0xFFFF) {
-      piv[0] = (uint8_t) (seq >> 8);
-      piv[1] = (uint8_t) seq;
-      piv_len = 2;
-    } else {
-      piv[0] = (uint8_t) (seq >> 16);
-      piv[1] = (uint8_t) (seq >> 8);
-      piv[2] = (uint8_t) seq;
-      piv_len = 3;
-    }
+    piv_len = oscore_encode_piv(this->oscore_sender_seq_no_, piv);
     // Notification nonce uses server's sender_id as KID
     memcpy(kid, this->oscore_sender_id_buf_, this->oscore_sender_id_len_);
     kid_len = this->oscore_sender_id_len_;
@@ -951,14 +947,9 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
 #ifdef USE_COAP_OSCORE
 uint8_t CoapServer::oscore_build_notify_option_(uint8_t *opt_buf) {
   uint32_t seq = (this->oscore_sender_seq_no_ == 0) ? 0 : (this->oscore_sender_seq_no_ - 1);
-  uint8_t piv_len = (seq <= 0xFF) ? 1 : (seq <= 0xFFFF) ? 2 : 3;
-  uint8_t pos = 0;
-  opt_buf[pos++] = (uint8_t) (0x08 | piv_len);
-  if (piv_len == 3)
-    opt_buf[pos++] = (uint8_t) (seq >> 16);
-  if (piv_len >= 2)
-    opt_buf[pos++] = (uint8_t) (seq >> 8);
-  opt_buf[pos++] = (uint8_t) seq;
+  uint8_t piv_len = oscore_encode_piv(seq, opt_buf + 1);
+  opt_buf[0] = (uint8_t) (0x08 | piv_len);
+  uint8_t pos = 1 + piv_len;
   memcpy(opt_buf + pos, this->oscore_sender_id_buf_, this->oscore_sender_id_len_);
   pos += this->oscore_sender_id_len_;
   return pos;

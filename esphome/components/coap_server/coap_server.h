@@ -366,6 +366,8 @@ class CoapServer : public Component {
   size_t oscore_protect_response_(const uint8_t *inner, size_t inner_len, const OscoreRequestInfo &req_info,
                                   bool is_notification, uint8_t *out_buf, size_t out_buf_len);
 
+  // Writes seq as the shortest big-endian Partial IV (1 to 4 bytes); returns its length
+  static uint8_t oscore_encode_piv(uint32_t seq, uint8_t *piv);
   static void oscore_build_nonce(const uint8_t *piv, uint8_t piv_len, const uint8_t *kid, uint8_t kid_len,
                                  const uint8_t *common_iv, uint8_t nonce[OSCORE_IV_LEN]);
   static size_t oscore_build_aad(const uint8_t *kid, uint8_t kid_len, const uint8_t *piv, uint8_t piv_len, uint8_t *buf,
