@@ -33,18 +33,20 @@ from .const import (
     CONF_SERVER_PING_RETRY,
     CONF_SERVER_PING_TIMEOUT_RATIO,
     CONF_SUBSCRIPTION_CONFIRM,
-    CONF_TRANSPORT,
 )
 
 DOMAIN = "coap_server"
 CODEOWNERS = ["@rwrozelle"]
 
 
-def AUTO_LOAD(config: ConfigType) -> list[str]:
-    """The network transport needs socket; only an explicit openthread transport goes without it."""
-    if config and config.get(CONF_TRANSPORT) == "openthread":
-        return []
-    return ["socket"]
+def _uses_openthread() -> bool:
+    """OpenThread is the transport when the openthread component is configured, the network otherwise."""
+    return "openthread" in (CORE.raw_config or {})
+
+
+def AUTO_LOAD() -> list[str]:
+    """The network transport needs socket."""
+    return [] if _uses_openthread() else ["socket"]
 
 
 coap_server_ns = cg.esphome_ns.namespace("coap_server")
@@ -179,15 +181,6 @@ def _validate_subscription_mode(config):
     return config
 
 
-def _validate_transport(config):
-    transport = config.get(CONF_TRANSPORT)
-    if transport == "openthread" and "openthread" not in CORE.loaded_integrations:
-        raise cv.Invalid(
-            f"'{CONF_TRANSPORT}: openthread' requires the openthread component to be configured"
-        )
-    return config
-
-
 def _validate_oscore_platform(config: ConfigType) -> ConfigType:
     if CONF_OSCORE in config and not (CORE.is_esp32 or CORE.is_host):
         raise cv.Invalid(
@@ -200,7 +193,6 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(CoapServer),
-            cv.Optional(CONF_TRANSPORT): cv.one_of("openthread", "network", lower=True),
             cv.Optional(CONF_PORT, default=5683): cv.uint16_t,
             # Only valid when subscription_confirm is false (NON observe mode)
             cv.Optional(CONF_SERVER_PING_INTERVAL): cv.All(
@@ -239,18 +231,12 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_subscription_mode,
-    _validate_transport,
     _validate_oscore_platform,
 )
 
 
 async def to_code(config):
-    transport = config.get(CONF_TRANSPORT)
-    use_ot = (
-        transport == "openthread"
-        if transport is not None
-        else "openthread" in CORE.loaded_integrations
-    )
+    use_ot = _uses_openthread()
 
     id_ = config[CONF_ID].copy()
     id_.type = CoapServerOT if use_ot else CoapServerNet
