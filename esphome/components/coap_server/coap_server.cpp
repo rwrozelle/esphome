@@ -580,6 +580,10 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
   bool has_kid = (flags >> 3) & 1;      // RFC 8613 Table 1: bit 3 = k (KID flag)
 
   uint8_t pos = (opt_len > 0) ? 1u : 0u;
+  if (piv_len > sizeof(req_info->piv)) {  // 6 and 7 are reserved (RFC 8613 §6.1)
+    ESP_LOGW(TAG, "OSCORE: reserved PIV length %u", piv_len);
+    return false;
+  }
   if (piv_len > 0) {
     if (pos + piv_len > opt_len) {
       ESP_LOGW(TAG, "OSCORE: PIV overflow pos=%u piv_len=%u opt_len=%u", pos, piv_len, opt_len);
