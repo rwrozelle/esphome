@@ -160,7 +160,7 @@ void CoapServerOT::setup() {
 
 bool CoapServerOT::teardown() {
   {
-    std::lock_guard<std::mutex> lock(this->lock_);
+    LockGuard lock(this->lock_);
     for (ehCoapObserver *cur = this->active_observers_; cur != nullptr;) {
       ehCoapObserver *next = cur->next;
       delete cur;
@@ -282,7 +282,7 @@ void CoapServerOT::handle_notification_ack(void *context, otMessage *message, co
     ehCoapObserver *observer = static_cast<ehCoapObserver *>(context);
     CoapServerOT *server = nullptr;
     {
-      std::lock_guard<std::mutex> lock(static_cast<CoapServerOT *>(global_coap_server)->lock_);
+      LockGuard lock(static_cast<CoapServerOT *>(global_coap_server)->lock_);
       observer->con_pending = false;
       if (observer->resource != nullptr) {
         server = observer->resource->server;
@@ -392,7 +392,7 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
             goto exit;
           }
           {
-            std::lock_guard<std::mutex> lock(this->lock_);
+            LockGuard lock(this->lock_);
             for (ehCoapObserver *stale = this->active_observers_; stale != nullptr; stale = stale->next) {
               if (stale->resource == resource &&
                   otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
@@ -416,14 +416,14 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
 #endif
           bool client_known;
           {
-            std::lock_guard<std::mutex> guard(this->lock_);
+            LockGuard guard(this->lock_);
             client_known = (this->find_client_(message_info->mPeerAddr) != nullptr);
           }
           if (!client_known)
             this->new_client_(*message_info);
         } else if (observe == 1 && observer != nullptr) {
           ESP_LOGD(TAG, "Cancel Observer: /%s", resource->path);
-          std::lock_guard<std::mutex> lock(this->lock_);
+          LockGuard lock(this->lock_);
           this->free_observer_(observer);
         }
         if (obs != nullptr)
@@ -668,7 +668,7 @@ void CoapServerOT::handle_ping_request(void *context, otMessage *message, const 
   // Send -1 on the first ping from a client after device boot so HA detects the reboot.
   bool boot_signal = false;
   {
-    std::lock_guard<std::mutex> guard(self->lock_);
+    LockGuard guard(self->lock_);
     ehCoapClient *client = self->find_client_(message_info->mPeerAddr);
     if (client != nullptr) {
       client->last_response_ms = millis();
@@ -703,7 +703,7 @@ exit:
 }  // handle_ping_request
 
 void CoapServerOT::shrink_observers() {
-  std::lock_guard<std::mutex> lock(this->lock_);
+  LockGuard lock(this->lock_);
   ehCoapObserver *cur = this->free_observers_;
   while (cur != nullptr) {
     ehCoapObserver *next = cur->next;
@@ -738,7 +738,7 @@ void CoapServerOT::handle_observer_(ehCoapObserver *observer, ehCoapResource *ex
   otCoapToken token;
   otMessageInfo msg_info_copy;
   {
-    std::lock_guard<std::mutex> guard(this->lock_);
+    LockGuard guard(this->lock_);
     if (observer->resource != expected_resource)
       return;
     bool obs_confirmable = (observer->obs_type == OT_COAP_TYPE_CONFIRMABLE);
@@ -905,7 +905,7 @@ uint8_t CoapServerOT::observe_(otMessage *message) {
 
 ehCoapObserver *CoapServerOT::get_observer_(otMessage *message, const otMessageInfo *message_info) {
   otCoapToken coap_token;
-  std::lock_guard<std::mutex> lock(this->lock_);
+  LockGuard lock(this->lock_);
   if (otCoapMessageReadToken(message, &coap_token) != OT_ERROR_NONE) {
     return nullptr;
   }
@@ -920,7 +920,7 @@ ehCoapObserver *CoapServerOT::get_observer_(otMessage *message, const otMessageI
 
 ehCoapObserver *CoapServerOT::new_observer_(ehCoapResource *resource, const otMessageInfo &message_info,
                                             const otCoapToken &token, otCoapType obs_type) {
-  std::lock_guard<std::mutex> lock(this->lock_);
+  LockGuard lock(this->lock_);
   ehCoapObserver *obs;
   if (this->free_observers_ != nullptr) {
     obs = this->free_observers_;
@@ -953,7 +953,7 @@ ehCoapObserver *CoapServerOT::new_observer_(ehCoapResource *resource, const otMe
 ehCoapClient *CoapServerOT::new_client_(const otMessageInfo &message_info) {
   ehCoapClient *result = nullptr;
   {
-    std::lock_guard<std::mutex> lock(this->lock_);
+    LockGuard lock(this->lock_);
     for (uint8_t i = 0; i < USE_COAP_SERVER_MAX_CLIENTS; i++) {
       ehCoapClient &client = this->active_clients_[i];
       if (!client.active) {
@@ -1000,7 +1000,7 @@ void CoapServerOT::ping_client_(ehCoapClient *client) {
     bool client_recently_active = false;
     uint8_t ping_miss_count = 0;
     {
-      std::lock_guard<std::mutex> guard(this->lock_);
+      LockGuard guard(this->lock_);
       if (client->last_ping_sent_ms != 0) {
         uint32_t timeout_ms =
             (uint32_t) std::max((this->client_ping_interval_ms_ * this->client_ping_timeout_ratio_), (float) 1000.0f);
@@ -1032,7 +1032,7 @@ void CoapServerOT::ping_client_(ehCoapClient *client) {
       msg_info.mPeerAddr = client->peer_addr;
       msg_info.mPeerPort = client->peer_port;
       {
-        std::lock_guard<std::mutex> guard(this->lock_);
+        LockGuard guard(this->lock_);
         client->last_ping_sent_ms = now;
       }
       otError err = otCoapSendRequest(
@@ -1040,7 +1040,7 @@ void CoapServerOT::ping_client_(ehCoapClient *client) {
           [](void *ctx, otMessage *msg, const otMessageInfo *info, otError error) {
             if (error == OT_ERROR_NONE) {
               ehCoapClient *c = static_cast<ehCoapClient *>(ctx);
-              std::lock_guard<std::mutex> guard(static_cast<CoapServerOT *>(global_coap_server)->lock_);
+              LockGuard guard(static_cast<CoapServerOT *>(global_coap_server)->lock_);
               if (c->active) {
                 c->last_response_ms = millis();
                 c->ping_miss_count = 0;
@@ -1068,7 +1068,7 @@ ehCoapClient *CoapServerOT::find_client_(const otIp6Address &addr) {
 }
 
 void CoapServerOT::touch_client_(const otMessageInfo &message_info) {
-  std::lock_guard<std::mutex> guard(this->lock_);
+  LockGuard guard(this->lock_);
   ehCoapClient *client = this->find_client_(message_info.mPeerAddr);
   if (client != nullptr) {
     client->last_response_ms = millis();
@@ -1080,7 +1080,7 @@ void CoapServerOT::free_client_(ehCoapClient *client) {
   this->cancel_ping_client_(client);
   otIp6Address peer_addr;
   {
-    std::lock_guard<std::mutex> lock(this->lock_);
+    LockGuard lock(this->lock_);
     peer_addr = client->peer_addr;
     client->active = false;
     this->active_client_count_--;
@@ -1095,7 +1095,7 @@ void CoapServerOT::free_client_(ehCoapClient *client) {
   // The has_non_observer update inside free_observer_ is skipped because find_client_
   // never returns an inactive slot, so we inline the unlink directly.
   {
-    std::lock_guard<std::mutex> lock(this->lock_);
+    LockGuard lock(this->lock_);
     ehCoapObserver **pp = &this->active_observers_;
     while (*pp != nullptr) {
       ehCoapObserver *obs = *pp;
@@ -1155,7 +1155,7 @@ void CoapServerOT::notify_observers_(ehCoapResource *resource, const uint8_t *pa
   Pending pending[USE_COAP_SERVER_MAX_CLIENTS];
   size_t pending_count = 0;
   {
-    std::lock_guard<std::mutex> lock(this->lock_);
+    LockGuard lock(this->lock_);
     for (ehCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
       if (obs->resource == resource) {
         ESP_LOGV(TAG, "Found Observer: /%s", resource->path);
@@ -1265,7 +1265,7 @@ void CoapServerOT::handle_logs_request(void *context, otMessage *message, const 
     }
     // Replace any stale observer from the same client IP
     {
-      std::lock_guard<std::mutex> lock(self->lock_);
+      LockGuard lock(self->lock_);
       for (ehCoapObserver *stale = self->active_observers_; stale != nullptr; stale = stale->next) {
         if (stale->resource == resource &&
             otIp6IsAddressEqual(&stale->message_info.mPeerAddr, &message_info->mPeerAddr)) {
@@ -1280,7 +1280,7 @@ void CoapServerOT::handle_logs_request(void *context, otMessage *message, const 
   } else if (observe == 1) {
     ehCoapObserver *obs = self->get_observer_(message, message_info);
     if (obs != nullptr) {
-      std::lock_guard<std::mutex> lock(self->lock_);
+      LockGuard lock(self->lock_);
       self->free_observer_(obs);
     }
   }
@@ -1304,7 +1304,7 @@ exit:
 
 void CoapServerOT::on_log(uint8_t level, const char *tag, const char *message, size_t message_len) {
   {
-    std::lock_guard<std::mutex> guard(this->lock_);
+    LockGuard guard(this->lock_);
     bool found = false;
     for (ehCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
       if (obs->resource == this->logs_resource_) {

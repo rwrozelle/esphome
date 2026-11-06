@@ -4,7 +4,6 @@
 
 #ifdef USE_COAP_SERVER_OPENTHREAD
 
-#include <mutex>
 #include <openthread/coap.h>
 
 namespace esphome::coap_server {
@@ -108,7 +107,7 @@ class CoapServerOT : public CoapServer {
   ehCoapObserver *free_observers_{nullptr};
   uint8_t active_count_{0};
   uint8_t high_water_mark_{0};
-  mutable std::mutex lock_;
+  mutable Mutex lock_;
 
 #ifdef USE_COAP_OSCORE
   // Returns false and sends 4.01 if the request must be OSCORE-protected but isn't.

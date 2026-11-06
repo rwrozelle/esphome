@@ -666,7 +666,7 @@ void CoapServer::log_append_entry_(uint8_t level, const char *tag, const char *m
   if (entry_size > sizeof(entry_buf))
     return;
 
-  std::scoped_lock guard(this->log_mutex_);
+  LockGuard guard(this->log_mutex_);
   if (this->log_buf_pos_ + entry_size + 1 > LOG_BUF_SIZE)
     return;
   memcpy(this->log_buf_ + this->log_buf_pos_, entry_buf, entry_size);
@@ -675,7 +675,7 @@ void CoapServer::log_append_entry_(uint8_t level, const char *tag, const char *m
 }
 
 size_t CoapServer::take_log_payload_(uint8_t *out) {
-  std::scoped_lock guard(this->log_mutex_);
+  LockGuard guard(this->log_mutex_);
   if (!this->log_buf_has_data_)
     return 0;
   this->log_buf_[this->log_buf_pos_] = 0xFF;  // CBOR break byte — closes the indefinite array

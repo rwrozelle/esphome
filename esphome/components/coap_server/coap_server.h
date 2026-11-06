@@ -8,10 +8,6 @@
 #include <array>
 #include <memory>
 
-#ifdef USE_LOGGER
-#include <mutex>
-#endif
-
 #ifdef USE_COAP_OSCORE
 #include <vector>
 #include "oscore_backend.h"
@@ -282,7 +278,7 @@ class CoapServer : public Component {
   uint8_t log_buf_[LOG_BUF_SIZE]{};
   size_t log_buf_pos_{1};  // position 0 is always 0x9F (CBOR indefinite array start)
   bool log_buf_has_data_{false};
-  std::mutex log_mutex_;
+  Mutex log_mutex_;
 #endif  // USE_LOGGER
 
 #ifdef USE_COAP_OSCORE
