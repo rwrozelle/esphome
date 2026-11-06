@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "esphome/components/coap_server/coap_server_net.h"
+#include "esphome/core/preferences.h"
 
 namespace esphome::coap_server::testing {
 
@@ -94,7 +95,7 @@ inline uint8_t string_table_index(const char *(*lookup)(uint8_t), const char *va
 // ---------------------------------------------------------------------------
 
 #ifdef USE_COAP_OSCORE
-// Sends the OSCORE sequence number file to a fresh temporary folder instead of ~/.esphome/prefs
+// Gives the preferences, which hold the OSCORE sequence number, a fresh temporary folder instead of ~/.esphome/prefs
 class ScopedPrefDir {
  public:
   ScopedPrefDir() {
@@ -110,8 +111,15 @@ class ScopedPrefDir {
     }
     // Without a folder of its own, a path that cannot be created, so nothing is written anywhere else
     setenv("ESPHOME_PREFDIR", this->dir_.empty() ? "/proc/coap_server_test" : this->dir_.c_str(), 1);
+    // The global instance keeps the folder it first saw, so each test gets its own
+    this->old_host_ = host::host_preferences;
+    this->old_global_ = global_preferences;
+    host::host_preferences = &this->prefs_;
+    global_preferences = &this->prefs_;
   }
   ~ScopedPrefDir() {
+    host::host_preferences = this->old_host_;
+    global_preferences = this->old_global_;
     if (this->had_old_) {
       setenv("ESPHOME_PREFDIR", this->old_.c_str(), 1);
     } else {
@@ -131,6 +139,9 @@ class ScopedPrefDir {
   std::string dir_;
   std::string old_;
   bool had_old_{false};
+  host::HostPreferences prefs_;
+  host::HostPreferences *old_host_{nullptr};
+  ESPPreferences *old_global_{nullptr};
 };
 #endif
 

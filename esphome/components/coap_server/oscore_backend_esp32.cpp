@@ -2,7 +2,6 @@
 
 #if defined(USE_COAP_OSCORE) && defined(USE_ESP32)
 
-#include <nvs.h>
 #include <psa/crypto.h>
 #include "esphome/core/log.h"
 
@@ -10,8 +9,6 @@ namespace esphome::coap_server {
 
 ESPHOME_LOG_TAG(TAG, "coap_server");
 
-static constexpr const char *SEQ_NAMESPACE = "coap_oscore";
-static constexpr const char *SEQ_KEY = "seq";
 static constexpr psa_algorithm_t CCM_ALG = PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, OSCORE_AES_TAG_LEN);
 
 bool oscore_hkdf_sha256(const uint8_t *secret, size_t secret_len, const uint8_t *salt, size_t salt_len,
@@ -74,25 +71,6 @@ bool oscore_aes_ccm_decrypt(const uint8_t *key, const uint8_t *nonce, const uint
     return false;
   }
   return true;
-}
-
-bool oscore_seq_load(uint32_t *value) {
-  nvs_handle_t handle;
-  if (nvs_open(SEQ_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
-    return false;
-  esp_err_t err = nvs_get_u32(handle, SEQ_KEY, value);
-  nvs_close(handle);
-  return err == ESP_OK;
-}
-
-// Written straight to NVS: preferences only reach flash on their periodic sync, which a user may suspend
-bool oscore_seq_save(uint32_t value) {
-  nvs_handle_t handle;
-  if (nvs_open(SEQ_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK)
-    return false;
-  bool ok = nvs_set_u32(handle, SEQ_KEY, value) == ESP_OK && nvs_commit(handle) == ESP_OK;
-  nvs_close(handle);
-  return ok;
 }
 
 }  // namespace esphome::coap_server

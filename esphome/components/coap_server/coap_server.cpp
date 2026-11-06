@@ -20,12 +20,7 @@ void CoapServer::setup() {
     this->mark_failed();
     return;
   }
-  {
-    uint32_t stored_threshold = 0;
-    oscore_seq_load(&stored_threshold);
-    this->oscore_sender_seq_no_ = stored_threshold;
-    this->oscore_save_seq_no_();
-  }
+  this->oscore_restore_seq_no_();
 #endif  // USE_COAP_OSCORE
 
   {
@@ -626,6 +621,14 @@ size_t CoapServer::oscore_build_inner_cbor(uint8_t code, const uint8_t *payload,
   return 4 + payload_len;
 }
 
+void CoapServer::oscore_restore_seq_no_() {
+  this->oscore_seq_pref_ = global_preferences->make_preference<uint32_t>(OSCORE_SEQ_PREF_HASH, true);
+  uint32_t stored_threshold = 0;
+  this->oscore_seq_pref_.load(&stored_threshold);
+  this->oscore_sender_seq_no_ = stored_threshold;
+  this->oscore_save_seq_no_();
+}
+
 void CoapServer::oscore_save_seq_no_() {
   if (this->oscore_sender_seq_no_ >= OSCORE_SEQ_WARN) {
     ESP_LOGW(TAG, "OSCORE: sender sequence number approaching exhaustion (%" PRIu32 " / %" PRIu32 ")",
@@ -633,7 +636,8 @@ void CoapServer::oscore_save_seq_no_() {
   }
   const uint32_t threshold = this->oscore_sender_seq_no_ + OSCORE_SEQ_INTERVAL;
   // Keeping the old threshold retries the save on the next notification
-  if (this->status_comm_result(oscore_seq_save(threshold), LOG_STR("OSCORE sequence number save failed")))
+  const bool saved = this->oscore_seq_pref_.save(&threshold) && this->oscore_seq_pref_.sync();
+  if (this->status_comm_result(saved, LOG_STR("OSCORE sequence number save failed")))
     this->oscore_seq_threshold_ = threshold;
 }
 

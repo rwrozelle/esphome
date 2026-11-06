@@ -52,8 +52,17 @@ class OscoreServer : public TestableCoapServerNet {
   uint32_t sender_seq() const { return this->oscore_sender_seq_no_; }
   void set_sender_seq(uint32_t seq) { this->oscore_sender_seq_no_ = seq; }
   uint32_t seq_threshold() const { return this->oscore_seq_threshold_; }
+  void restore_seq() { this->oscore_restore_seq_no_(); }
   void save_seq() { this->oscore_save_seq_no_(); }
   const std::string &pref_dir() const { return this->pref_dir_.dir(); }
+  // What a restart would find: a fresh instance reads the preferences file
+  static uint32_t stored_seq() {
+    host::HostPreferences prefs;
+    uint32_t value = 0;
+    if (!prefs.load_from_key(OSCORE_SEQ_PREF_HASH, reinterpret_cast<uint8_t *>(&value), sizeof(value)))
+      return 0;
+    return value;
+  }
 
   static uint8_t encode_piv(uint32_t seq, uint8_t *piv) { return oscore_encode_piv(seq, piv); }
   static void build_nonce(const uint8_t *piv, uint8_t piv_len, const uint8_t *kid, uint8_t kid_len,
@@ -72,6 +81,7 @@ class OscoreTest : public ::testing::Test {
   void SetUp() override {
     this->srv_.set_material({0x01}, {});
     ASSERT_TRUE(this->srv_.derive_keys());
+    this->srv_.restore_seq();
   }
   OscoreServer srv_;
 };
@@ -95,18 +105,6 @@ bool client_decrypt_reply(OscoreServer &srv, const uint8_t *piv, uint8_t piv_len
   uint8_t aad[80];
   size_t aad_len = OscoreServer::build_aad(NO_BYTES, 0, piv, piv_len, aad, sizeof(aad));
   return aad_len > 0 && oscore_aes_ccm_decrypt(srv.sender_key(), nonce, aad, aad_len, in, in_len, out, 256, out_len);
-}
-
-uint32_t read_seq_file(const std::string &dir) {
-  uint32_t value = 0;
-  std::string path = dir + "/" + App.get_name().c_str() + ".coap_oscore";
-  FILE *fp = fopen(path.c_str(), "rb");
-  if (fp == nullptr)
-    return 0;
-  if (fread(&value, sizeof(value), 1, fp) != 1)
-    value = 0;
-  fclose(fp);
-  return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,10 +381,19 @@ TEST_F(OscoreTest, SaveStoresThresholdAheadOfSequence) {
   this->srv_.save_seq();
 
   EXPECT_EQ(this->srv_.seq_threshold(), 100u + 1024u);
-  EXPECT_EQ(read_seq_file(this->srv_.pref_dir()), 100u + 1024u);
-  uint32_t loaded = 0;
-  ASSERT_TRUE(oscore_seq_load(&loaded));
-  EXPECT_EQ(loaded, 100u + 1024u);
+  EXPECT_EQ(OscoreServer::stored_seq(), 100u + 1024u);
+}
+
+TEST_F(OscoreTest, RestoreContinuesFromStoredThreshold) {
+  this->srv_.set_sender_seq(100);
+  this->srv_.save_seq();
+
+  // As after a restart: the next server starts at the stored threshold and stores the block after it
+  this->srv_.set_sender_seq(0);
+  this->srv_.restore_seq();
+
+  EXPECT_EQ(this->srv_.sender_seq(), 1124u);
+  EXPECT_EQ(OscoreServer::stored_seq(), 1124u + 1024u);
 }
 
 TEST_F(OscoreTest, NotificationReachingThresholdSavesNextBlock) {
@@ -399,7 +406,7 @@ TEST_F(OscoreTest, NotificationReachingThresholdSavesNextBlock) {
 
   ASSERT_GT(this->srv_.protect(inner, sizeof(inner), req, true, out, sizeof(out)), 0u);
 
-  EXPECT_EQ(read_seq_file(this->srv_.pref_dir()), 1024u + 1024u);
+  EXPECT_EQ(OscoreServer::stored_seq(), 1024u + 1024u);
 }
 
 TEST_F(OscoreTest, FailedSaveWarnsRetriesAndRecovers) {
@@ -407,17 +414,17 @@ TEST_F(OscoreTest, FailedSaveWarnsRetriesAndRecovers) {
   this->srv_.save_seq();
   ASSERT_FALSE(this->srv_.status_has_warning());
 
-  // A folder that cannot be created
-  setenv("ESPHOME_PREFDIR", "/proc/coap_server_test", 1);
+  // Without its folder the preferences file cannot be written
+  std::filesystem::remove_all(this->srv_.pref_dir());
   this->srv_.set_sender_seq(5000);
   this->srv_.save_seq();
   EXPECT_TRUE(this->srv_.status_has_warning());
   EXPECT_EQ(this->srv_.seq_threshold(), 1024u);  // unchanged, so the next notification retries
 
-  setenv("ESPHOME_PREFDIR", this->srv_.pref_dir().c_str(), 1);
+  std::filesystem::create_directories(this->srv_.pref_dir());
   this->srv_.save_seq();
   EXPECT_FALSE(this->srv_.status_has_warning());
-  EXPECT_EQ(read_seq_file(this->srv_.pref_dir()), 5000u + 1024u);
+  EXPECT_EQ(OscoreServer::stored_seq(), 5000u + 1024u);
 }
 
 // ---------------------------------------------------------------------------

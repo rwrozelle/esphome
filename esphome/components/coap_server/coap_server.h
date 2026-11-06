@@ -4,6 +4,7 @@
 #include "esphome/core/entity_base.h"
 #include "esphome/core/entity_includes.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/preferences.h"
 #include "esphome/core/util.h"
 #include <array>
 #include <memory>
@@ -300,6 +301,9 @@ class CoapServer : public Component {
 
   static constexpr uint32_t OSCORE_SEQ_INTERVAL = 1024;
   static constexpr uint32_t OSCORE_SEQ_WARN = UINT32_MAX - OSCORE_SEQ_INTERVAL;
+  // fnv1_hash("coap_server_oscore_seq")
+  static constexpr uint32_t OSCORE_SEQ_PREF_HASH = 3563581722UL;
+  ESPPreferenceObject oscore_seq_pref_;
   uint32_t oscore_sender_seq_no_{0};
   uint32_t oscore_seq_threshold_{0};
   uint32_t oscore_replay_top_{0};
@@ -310,6 +314,8 @@ class CoapServer : public Component {
   uint8_t oscore_sender_id_len_{0};
 
   bool oscore_derive_keys_();
+  // Continues from the stored sequence number and stores the next block
+  void oscore_restore_seq_no_();
   void oscore_save_seq_no_();
   void oscore_increment_seq_no_();
 

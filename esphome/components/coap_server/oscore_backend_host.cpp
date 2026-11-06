@@ -4,12 +4,6 @@
 
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
-#include <unistd.h>
-#include <cstdio>
-#include <cstdlib>
-#include <filesystem>
-#include <string>
-#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 namespace esphome::coap_server {
@@ -85,51 +79,6 @@ bool oscore_aes_ccm_decrypt(const uint8_t *key, const uint8_t *nonce, const uint
   }
   *out_len = cipher_len;
   return true;
-}
-
-// <prefs dir>/<name>.coap_oscore, next to the host preferences file
-static std::string seq_path() {
-  std::string dir;
-  if (const char *prefdir = getenv("ESPHOME_PREFDIR"); prefdir != nullptr) {
-    dir = prefdir;
-  } else if (const char *home = getenv("HOME"); home != nullptr) {
-    dir = std::string(home) + "/.esphome/prefs";
-  } else {
-    return {};
-  }
-  std::error_code ec;
-  std::filesystem::create_directories(dir, ec);
-  if (ec)
-    return {};
-  return dir + "/" + App.get_name().c_str() + ".coap_oscore";
-}
-
-bool oscore_seq_load(uint32_t *value) {
-  const std::string path = seq_path();
-  if (path.empty())
-    return false;
-  FILE *fp = fopen(path.c_str(), "rb");
-  if (fp == nullptr)
-    return false;
-  bool ok = fread(value, sizeof(*value), 1, fp) == 1;
-  fclose(fp);
-  return ok;
-}
-
-// Written to a temporary file, synced, then renamed, so a crash leaves the old value or the new one
-bool oscore_seq_save(uint32_t value) {
-  const std::string path = seq_path();
-  if (path.empty()) {
-    ESP_LOGE(TAG, "OSCORE: ESPHOME_PREFDIR and HOME are not set, cannot store the sequence number");
-    return false;
-  }
-  const std::string tmp = path + ".tmp";
-  FILE *fp = fopen(tmp.c_str(), "wb");
-  if (fp == nullptr)
-    return false;
-  bool ok = fwrite(&value, sizeof(value), 1, fp) == 1 && fflush(fp) == 0 && fsync(fileno(fp)) == 0;
-  ok = fclose(fp) == 0 && ok;
-  return ok && rename(tmp.c_str(), path.c_str()) == 0;
 }
 
 }  // namespace esphome::coap_server
