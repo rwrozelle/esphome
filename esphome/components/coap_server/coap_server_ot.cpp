@@ -49,6 +49,15 @@ void CoapServerOT::setup() {
   // For use in callbacks (in openthread task)
   this->instance_ = instance;
 
+#if defined(USE_ZEPHYR) && !defined(CONFIG_OPENTHREAD_COAP_BLOCK)
+  // The OpenThread library is built without block-wise transfer, so the handler sends each block
+  ClearAllBytes(this->wk_resource_);
+  this->wk_resource_.mUriPath = ".well-known/core";
+  this->wk_resource_.mHandler = &CoapServerOT::handle_well_known_core;
+  this->wk_resource_.mContext = this;
+  otCoapAddResource(this->instance_, &this->wk_resource_);
+  ESP_LOGD(TAG, "Add CoAP Server Resource: /.well-known/core");
+#else
   // Register .well-known/core as a block-wise resource so OT handles blocks 1+ automatically.
   // mTransmitHook is called by ProcessBlock2Request for block_number > 0, using mLastResponse
   // (cached by ProcessBlockwiseSend after block 0) to reconstruct response options.
@@ -60,6 +69,7 @@ void CoapServerOT::setup() {
   this->wk_bw_resource_.mContext = this;
   otCoapAddBlockWiseResource(this->instance_, &this->wk_bw_resource_);
   ESP_LOGD(TAG, "Add CoAP BlockWise Resource: /.well-known/core");
+#endif
 
   // Configure the /info resource
   this->resources_.push_back(ehCoapResource());
@@ -176,7 +186,11 @@ bool CoapServerOT::teardown() {
   }
   openthread::InstanceLock lock = openthread::InstanceLock::acquire();
   otInstance *instance = lock.get_instance();
+#if defined(USE_ZEPHYR) && !defined(CONFIG_OPENTHREAD_COAP_BLOCK)
+  otCoapRemoveResource(instance, &this->wk_resource_);
+#else
   otCoapRemoveBlockWiseResource(instance, &this->wk_bw_resource_);
+#endif
   for (auto &res : this->resources_)
     otCoapRemoveResource(instance, &res);
   otCoapRemoveResource(instance, &this->ping_resource_);
@@ -213,12 +227,14 @@ void CoapServerOT::handle_well_known_core(void *context, otMessage *message, con
   CoapServerOT *self = static_cast<CoapServerOT *>(context);
   otInstance *instance = self->instance_;
 
+#if !(defined(USE_ZEPHYR) && !defined(CONFIG_OPENTHREAD_COAP_BLOCK))
   // Refresh wk_source_ each call (idempotent; link_format_buf_ is read-only after setup()).
   // OT holds &wk_source_ as ctx for blocks 1+, so it must outlive the handler — member storage satisfies this.
   self->wk_source_.data = self->link_format_buf_.get();
   self->wk_source_.data_len = self->link_format_size_;
   self->wk_source_.content_format = OT_COAP_OPTION_CONTENT_FORMAT_LINK_FORMAT;
   self->wk_source_.read_fn = nullptr;
+#endif
 
   otError error = OT_ERROR_NONE;
   otMessage *response = otCoapNewMessage(instance, nullptr);
@@ -232,10 +248,17 @@ void CoapServerOT::handle_well_known_core(void *context, otMessage *message, con
                      otCoapOptionIteratorGetFirstOptionMatching(&iterator, OT_COAP_OPTION_BLOCK2) != nullptr &&
                      otCoapOptionIteratorGetOptionUintValue(&iterator, &block2_value) == OT_ERROR_NONE);
 
-  SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
-  SuccessOrExit(error = otCoapMessageAppendContentFormatOption(
-                    response, static_cast<otCoapOptionContentFormat>(self->wk_source_.content_format)));
+#if defined(USE_ZEPHYR) && !defined(CONFIG_OPENTHREAD_COAP_BLOCK)
+  if (has_block2) {
+    self->send_well_known_block_(message, message_info, response, block2_value);
+    return;
+  }
+#endif
 
+  SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
+  SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_LINK_FORMAT));
+
+#if !(defined(USE_ZEPHYR) && !defined(CONFIG_OPENTHREAD_COAP_BLOCK))
   if (has_block2) {
     // Echo Block2 back with NUM=0, M=1: ProcessBlockwiseSend reads this to drive the first block,
     // then caches the response (mLastResponse) so ProcessBlock2Request can serve blocks 1+.
@@ -244,11 +267,13 @@ void CoapServerOT::handle_well_known_core(void *context, otMessage *message, con
     SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
     SuccessOrExit(error = otCoapSendResponseBlockWise(instance, response, message_info, &self->wk_source_,
                                                       &CoapServerOT::source_transmit_hook));
-  } else {
+  } else
+#endif
+  {
     // No Block2 hint — send inline (payload must fit in one UDP packet).
     SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-    SuccessOrExit(
-        error = otMessageAppend(response, self->wk_source_.data, static_cast<uint16_t>(self->wk_source_.data_len)));
+    SuccessOrExit(error = otMessageAppend(response, self->link_format_buf_.get(),
+                                          static_cast<uint16_t>(self->link_format_size_)));
     SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
   }
 
@@ -260,6 +285,40 @@ exit:
   }
 }  // handle_well_known_core
 
+#if defined(USE_ZEPHYR) && !defined(CONFIG_OPENTHREAD_COAP_BLOCK)
+// One block per request, as the network transport sends it
+void CoapServerOT::send_well_known_block_(otMessage *message, const otMessageInfo *message_info, otMessage *response,
+                                          uint64_t block2_value) {
+  // Block2 value: NUM << 4 | M << 3 | SZX; SZX is capped at 6 (1024 bytes)
+  const uint8_t szx = std::min<uint8_t>(block2_value & 0x7, 6);
+  const uint64_t num = block2_value >> 4;
+  const size_t block_size = 16u << szx;
+  const size_t total = this->link_format_size_;
+  const bool in_range = num < (total + block_size - 1) / block_size;
+  const size_t offset = in_range ? num * block_size : 0;
+  const size_t len = in_range ? std::min(block_size, total - offset) : 0;
+  otError error = OT_ERROR_NONE;
+
+  if (in_range) {
+    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
+    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_LINK_FORMAT));
+    SuccessOrExit(error = otCoapMessageAppendBlock2Option(response, static_cast<uint32_t>(num), offset + len < total,
+                                                          static_cast<otCoapBlockSzx>(szx)));
+    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
+    SuccessOrExit(error = otMessageAppend(response, this->link_format_buf_.get() + offset, static_cast<uint16_t>(len)));
+  } else {
+    SuccessOrExit(error =
+                      otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_BAD_REQUEST));
+  }
+  SuccessOrExit(error = otCoapSendResponse(this->instance_, response, message_info));
+
+exit:
+  if (error != OT_ERROR_NONE) {
+    ESP_LOGE(TAG, "coap send response error %d: %s", error, otThreadErrorToString(error));
+    otMessageFree(response);
+  }
+}
+#else
 // static — transmit-hook wrapper for blocks 1+: ProcessBlock2Request calls mTransmitHook(mContext, ...)
 // where mContext = CoapServerOT*.  Delegates to CoapServer::blockwise_transmit_hook with &wk_source_.
 otError CoapServerOT::wk_blockwise_transmit_hook(void *ctx, uint8_t *block, uint32_t pos, uint16_t *len, bool *more) {
@@ -271,6 +330,7 @@ otError CoapServerOT::wk_blockwise_transmit_hook(void *ctx, uint8_t *block, uint
 otError CoapServerOT::source_transmit_hook(void *ctx, uint8_t *block, uint32_t pos, uint16_t *len, bool *more) {
   return CoapServer::blockwise_transmit_hook(ctx, block, pos, len, more) ? OT_ERROR_NONE : OT_ERROR_INVALID_ARGS;
 }
+#endif
 
 // static handler
 void CoapServerOT::handle_notification_ack(void *context, otMessage *message, const otMessageInfo *message_info,

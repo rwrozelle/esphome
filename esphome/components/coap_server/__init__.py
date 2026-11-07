@@ -3,7 +3,8 @@ import esphome.codegen as cg
 from esphome.components import socket as esphome_socket
 from esphome.components.const import CONF_DEVICE_TYPE
 from esphome.components.esp32 import require_mbedtls_tls_extras
-from esphome.components.openthread.const import CONF_POLL_PERIOD
+from esphome.components.openthread import add_core_option
+from esphome.components.openthread.const import CONF_CORE_OPTIONS, CONF_POLL_PERIOD
 from esphome.components.zephyr import zephyr_add_prj_conf
 from esphome.config_helpers import filter_source_files_from_defines
 import esphome.config_validation as cv
@@ -49,6 +50,9 @@ def AUTO_LOAD() -> list[str]:
     """The network transport needs socket."""
     return [] if _uses_openthread() else ["socket"]
 
+
+# Set by coap_server on ESP32; on Zephyr the OpenThread library decides, see coap_server_ot.h
+OT_BLOCKWISE_OPTION = "OPENTHREAD_CONFIG_COAP_BLOCKWISE_TRANSFER_ENABLE"
 
 coap_server_ns = cg.esphome_ns.namespace("coap_server")
 CoapServer = coap_server_ns.class_("CoapServer", cg.Component)
@@ -251,6 +255,9 @@ async def to_code(config):
 
     if not use_ot:
         esphome_socket.consume_sockets(1, DOMAIN, esphome_socket.SocketType.UDP)(config)
+    elif CORE.is_esp32:
+        # .well-known/core is sent with OpenThread's block-wise transfer
+        add_core_option(OT_BLOCKWISE_OPTION, "1")
 
     cg.add(var.set_server_ping_interval(config[CONF_SERVER_PING_INTERVAL]))
     cg.add(var.set_server_ping_timeout_ratio(config[CONF_SERVER_PING_TIMEOUT_RATIO]))
@@ -309,6 +316,10 @@ def _final_validate(config):
     ot_config = full_config.get("openthread")
     if ot_config is None:
         return
+    if ot_config.get(CONF_CORE_OPTIONS, {}).get(OT_BLOCKWISE_OPTION, "1") != "1":
+        raise cv.Invalid(
+            f"coap_server needs openthread '{CONF_CORE_OPTIONS}: {OT_BLOCKWISE_OPTION}' to be 1",
+        )
     if ot_config.get(CONF_DEVICE_TYPE) != "MTD":
         return
     poll_period = ot_config.get(CONF_POLL_PERIOD)

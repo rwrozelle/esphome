@@ -87,6 +87,14 @@ class CoapServerOT : public CoapServer {
   // Careful: use only inside CoAP callbacks (OpenThread task context)
   otInstance *instance_;
 
+// Without CONFIG_OPENTHREAD_COAP_BLOCK, the Zephyr OpenThread library has no block-wise transfer (NCS's prebuilt
+// library never has it). On ESP32 coap_server turns it on with OPENTHREAD_CONFIG_COAP_BLOCKWISE_TRANSFER_ENABLE.
+#if defined(USE_ZEPHYR) && !defined(CONFIG_OPENTHREAD_COAP_BLOCK)
+  // Sends the .well-known/core block that block2_value asks for, and frees response on failure
+  void send_well_known_block_(otMessage *message, const otMessageInfo *message_info, otMessage *response,
+                              uint64_t block2_value);
+  otCoapResource wk_resource_{};
+#else
   // Block-wise source for .well-known/core responses; refreshed each handler call.
   // Lives as a member so the ctx pointer given to OT remains valid across block requests.
   BlockwiseSource wk_source_;
@@ -99,6 +107,7 @@ class CoapServerOT : public CoapServer {
 
   // Block-wise resource registration for .well-known/core (otCoapAddBlockWiseResource).
   otCoapBlockwiseResource wk_bw_resource_{};
+#endif
 
   ehCoapResource ping_resource_;
   esphome::FixedVector<ehCoapResource> resources_;

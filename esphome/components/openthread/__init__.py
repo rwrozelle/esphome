@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 import re
 from typing import Any
 
@@ -247,9 +248,33 @@ def set_sdkconfig_options(config: ConfigType) -> None:
     add_idf_sdkconfig_option(f"CONFIG_OPENTHREAD_{config.get(CONF_DEVICE_TYPE)}", True)
 
 
-def _write_custom_header(config: ConfigType) -> None:
+@dataclass
+class OpenThreadData:
+    # Core options added by other components, written with the user's core_options
+    core_options: dict[str, str] = field(default_factory=dict)
+
+
+def _get_data() -> OpenThreadData:
+    if DOMAIN not in CORE.data:
+        CORE.data[DOMAIN] = OpenThreadData()
+    return CORE.data[DOMAIN]
+
+
+def add_core_option(name: str, value: str) -> None:
+    """Set an OpenThread core option on ESP32, as if the user had added it to core_options.
+
+    Call from to_code(). A component that needs the value validates against the user's
+    core_options itself, as the user's value would be replaced.
+    """
+    _get_data().core_options[name] = value
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _write_custom_header(config: ConfigType) -> None:
     """Write core_options to the OpenThread custom header."""
-    if not (options := config.get(CONF_CORE_OPTIONS)):
+    # Runs last so the options other components add in their to_code are included
+    options = {**config.get(CONF_CORE_OPTIONS, {}), **_get_data().core_options}
+    if not options:
         return
 
     add_idf_sdkconfig_option("CONFIG_OPENTHREAD_HEADER_CUSTOM", True)
@@ -579,7 +604,7 @@ async def to_code(config: ConfigType) -> None:
 
     if CORE.is_esp32:
         set_sdkconfig_options(config)
-        _write_custom_header(config)
+        CORE.add_job(_write_custom_header, config)
     elif CORE.using_zephyr:
         # Crypto through PSA: mbedtls, plus Oberon from SDK 2.7
         include_west_project("mbedtls")
