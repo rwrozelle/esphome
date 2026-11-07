@@ -1,6 +1,6 @@
 #include "oscore_backend.h"
 
-#if defined(USE_COAP_OSCORE) && defined(USE_ESP32)
+#if defined(USE_COAP_OSCORE) && (defined(USE_ESP32) || defined(USE_NRF52))
 
 #include <psa/crypto.h>
 #include "esphome/core/log.h"
@@ -75,4 +75,4 @@ bool oscore_aes_ccm_decrypt(const uint8_t *key, const uint8_t *nonce, const uint
 
 }  // namespace esphome::coap_server
 
-#endif  // USE_COAP_OSCORE && USE_ESP32
+#endif  // USE_COAP_OSCORE && (USE_ESP32 || USE_NRF52)

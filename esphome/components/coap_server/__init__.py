@@ -4,6 +4,7 @@ from esphome.components import socket as esphome_socket
 from esphome.components.const import CONF_DEVICE_TYPE
 from esphome.components.esp32 import require_mbedtls_tls_extras
 from esphome.components.openthread.const import CONF_POLL_PERIOD
+from esphome.components.zephyr import zephyr_add_prj_conf
 from esphome.config_helpers import filter_source_files_from_defines
 import esphome.config_validation as cv
 from esphome.const import (
@@ -182,9 +183,10 @@ def _validate_subscription_mode(config):
 
 
 def _validate_oscore_platform(config: ConfigType) -> ConfigType:
-    if CONF_OSCORE in config and not (CORE.is_esp32 or CORE.is_host):
+    if CONF_OSCORE in config and not (CORE.is_esp32 or CORE.is_nrf52 or CORE.is_host):
         raise cv.Invalid(
-            f"'{CONF_OSCORE}' is only supported on ESP32 and host", path=[CONF_OSCORE]
+            f"'{CONF_OSCORE}' is only supported on ESP32, nRF52 and host",
+            path=[CONF_OSCORE],
         )
     return config
 
@@ -280,6 +282,15 @@ async def to_code(config):
         if CORE.is_esp32:
             # OSCORE encrypts with AES-CCM
             require_mbedtls_tls_extras({"CONFIG_MBEDTLS_CCM_C"})
+        elif CORE.is_nrf52:
+            # Also selected by OpenThread's PSA crypto
+            for name in (
+                "PSA_WANT_ALG_CCM",
+                "PSA_WANT_ALG_HKDF",
+                "PSA_WANT_ALG_SHA_256",
+                "PSA_WANT_KEY_TYPE_AES",
+            ):
+                zephyr_add_prj_conf(name, True)
         elif CORE.is_host:
             add_host_openssl()
         cg.add(
