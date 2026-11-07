@@ -123,11 +123,17 @@ uint16_t otMessageRead(const otMessage *msg, uint16_t offset, void *buf, uint16_
 otCoapCode otCoapMessageGetCode(const otMessage *msg) { return as_fake(msg)->code; }
 otCoapType otCoapMessageGetType(const otMessage *msg) { return as_fake(msg)->type; }
 
+#if OPENTHREAD_API_VERSION >= 574
 otError otCoapMessageInit(otMessage *msg, otCoapType type, otCoapCode code) {
+#else
+void otCoapMessageInit(otMessage *msg, otCoapType type, otCoapCode code) {
+#endif
   FakeMessage *m = as_fake(msg);
   m->type = type;
   m->code = code;
+#if OPENTHREAD_API_VERSION >= 574
   return OT_ERROR_NONE;
+#endif
 }
 
 otError otCoapMessageInitResponse(otMessage *response, const otMessage *request, otCoapType type, otCoapCode code) {
@@ -178,6 +184,32 @@ bool otCoapAreTokensEqual(const otMessage *a, const otMessage *b) {
 
 uint8_t otCoapMessageGetTokenLength(const otMessage *msg) { return as_fake(msg)->token_len; }
 const uint8_t *otCoapMessageGetToken(const otMessage *msg) { return as_fake(msg)->token; }
+
+otError otCoapMessageSetToken(otMessage *msg, const uint8_t *token, uint8_t token_len) {
+  if (token_len > OT_COAP_MAX_TOKEN_LENGTH)
+    return OT_ERROR_INVALID_ARGS;
+  FakeMessage *m = as_fake(msg);
+  memcpy(m->token, token, token_len);
+  m->token_len = token_len;
+  return OT_ERROR_NONE;
+}
+
+#if OPENTHREAD_API_VERSION >= 569
+otError otCoapMessageReadToken(const otMessage *msg, otCoapToken *token) {
+  const FakeMessage *m = as_fake(msg);
+  memcpy(token->m8, m->token, m->token_len);
+  token->mLength = m->token_len;
+  return OT_ERROR_NONE;
+}
+
+otError otCoapMessageWriteToken(otMessage *msg, const otCoapToken *token) {
+  return otCoapMessageSetToken(msg, token->m8, token->mLength);
+}
+
+bool otCoapMessageAreTokensEqual(const otCoapToken *a, const otCoapToken *b) {
+  return a->mLength == b->mLength && memcmp(a->m8, b->m8, a->mLength) == 0;
+}
+#endif
 
 // Only a Block2 option set with fake_ot::set_request_block2() is ever found
 otError otCoapOptionIteratorInit(otCoapOptionIterator *it, const otMessage * /*msg*/) {

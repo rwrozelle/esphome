@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include "openthread/instance.h"
 #include "openthread/ip6.h"
 
 // ---------------------------------------------------------------------------
@@ -13,14 +15,13 @@
 // otInstance must be a complete type so InstanceLock::get_instance() can instantiate it.
 struct otInstance {};
 
-// otError as typedef of int (not enum) to allow implicit conversions from uint8_t
-// (required for SuccessOrExit(error = otCoapMessageReadToken(...)) patterns).
 typedef int otError;
 static constexpr otError OT_ERROR_NONE = 0;
 static constexpr otError OT_ERROR_FAILED = 1;
 static constexpr otError OT_ERROR_DROP = 2;
 static constexpr otError OT_ERROR_NO_BUFS = 3;
 static constexpr otError OT_ERROR_NOT_FOUND = 5;
+static constexpr otError OT_ERROR_PARSE = 6;
 static constexpr otError OT_ERROR_INVALID_ARGS = 7;
 static constexpr otError OT_ERROR_RESPONSE_TIMEOUT = 26;
 
@@ -86,10 +87,13 @@ typedef enum {
 
 static constexpr uint8_t OT_COAP_MAX_TOKEN_LENGTH = 8;
 
-typedef struct {
+// Added in API 569; before that ot_coap_compat.h provides it
+#if OPENTHREAD_API_VERSION >= 569
+typedef struct otCoapToken {
+  uint8_t m8[OT_COAP_MAX_TOKEN_LENGTH];
   uint8_t mLength;
-  uint8_t mToken[OT_COAP_MAX_TOKEN_LENGTH];
 } otCoapToken;
+#endif
 
 // ---------------------------------------------------------------------------
 // CoAP option iterator
@@ -169,7 +173,11 @@ uint16_t otMessageRead(const otMessage *aMessage, uint16_t aOffset, void *aBuf, 
 otCoapCode otCoapMessageGetCode(const otMessage *aMessage);
 otCoapType otCoapMessageGetType(const otMessage *aMessage);
 
+#if OPENTHREAD_API_VERSION >= 574
 otError otCoapMessageInit(otMessage *aMessage, otCoapType aType, otCoapCode aCode);
+#else
+void otCoapMessageInit(otMessage *aMessage, otCoapType aType, otCoapCode aCode);
+#endif
 otError otCoapMessageInitResponse(otMessage *aResponse, const otMessage *aRequest, otCoapType aType, otCoapCode aCode);
 otError otCoapMessageAppendContentFormatOption(otMessage *aMessage, otCoapOptionContentFormat aContentFormat);
 otError otCoapMessageAppendObserveOption(otMessage *aMessage, uint32_t aObserve);
@@ -180,27 +188,13 @@ otError otCoapMessageSetPayloadMarker(otMessage *aMessage);
 bool otCoapAreTokensEqual(const otMessage *aFirst, const otMessage *aSecond);
 uint8_t otCoapMessageGetTokenLength(const otMessage *aMessage);
 const uint8_t *otCoapMessageGetToken(const otMessage *aMessage);
+otError otCoapMessageSetToken(otMessage *aMessage, const uint8_t *aToken, uint8_t aTokenLength);
 
-// Compatibility aliases used in coap_server_ot.cpp.
-// otCoapMessageAreTokensEqual is called in coap_server with otCoapToken* (not otMessage*)
-// so we accept const void* to handle both call sites.
-static inline bool otCoapMessageAreTokensEqual(const void *a, const void *b) {
-  const otCoapToken *ta = static_cast<const otCoapToken *>(a);
-  const otCoapToken *tb = static_cast<const otCoapToken *>(b);
-  return ta->mLength == tb->mLength && memcmp(ta->mToken, tb->mToken, ta->mLength) == 0;
-}
-static inline uint8_t otCoapMessageReadToken(const otMessage *a, otCoapToken *token) {
-  token->mLength = otCoapMessageGetTokenLength(a);
-  const uint8_t *tok = otCoapMessageGetToken(a);
-  for (uint8_t i = 0; i < token->mLength; i++)
-    token->mToken[i] = tok[i];
-  return token->mLength;
-}
-static inline otError otCoapMessageWriteToken(otMessage *a, const otCoapToken *token) {
-  (void) a;
-  (void) token;
-  return OT_ERROR_NONE;
-}
+#if OPENTHREAD_API_VERSION >= 569
+otError otCoapMessageReadToken(const otMessage *aMessage, otCoapToken *aToken);
+otError otCoapMessageWriteToken(otMessage *aMessage, const otCoapToken *aToken);
+bool otCoapMessageAreTokensEqual(const otCoapToken *aFirstToken, const otCoapToken *aSecondToken);
+#endif
 
 otError otCoapOptionIteratorInit(otCoapOptionIterator *aIterator, const otMessage *aMessage);
 const otCoapOption *otCoapOptionIteratorGetFirstOptionMatching(otCoapOptionIterator *aIterator, uint16_t aNumber);

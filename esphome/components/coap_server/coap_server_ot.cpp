@@ -760,7 +760,7 @@ void CoapServerOT::handle_observer_(ehCoapObserver *observer, ehCoapResource *ex
   if (message == nullptr) {
     return;
   }
-  SuccessOrExit(error = otCoapMessageInit(message, is_con ? OT_COAP_TYPE_CONFIRMABLE : OT_COAP_TYPE_NON_CONFIRMABLE,
+  SuccessOrExit(error = coap_message_init(message, is_con ? OT_COAP_TYPE_CONFIRMABLE : OT_COAP_TYPE_NON_CONFIRMABLE,
                                           OT_COAP_CODE_CONTENT));
   SuccessOrExit(error = otCoapMessageWriteToken(message, &token));
   SuccessOrExit(error = otCoapMessageAppendObserveOption(message, serial));

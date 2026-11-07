@@ -4,7 +4,7 @@
 
 #ifdef USE_COAP_SERVER_OPENTHREAD
 
-#include <openthread/coap.h>
+#include "ot_coap_compat.h"
 
 namespace esphome::coap_server {
 

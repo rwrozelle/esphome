@@ -1,3 +1,5 @@
+import os
+
 import esphome.codegen as cg
 from esphome.components.coap_server import add_host_openssl
 from esphome.core import CORE
@@ -31,6 +33,9 @@ def override_manifest(manifest: ComponentManifestOverride) -> None:
         cg.add_define("USE_COAP_SERVER_OPENTHREAD")
         # OpenThread API stand-in for the OpenThread transport; the openthread component is not built here
         cg.add_build_flag(f"-I{CORE.relative_src_path('coap_server', '__sdk')}")
+        # COAP_SERVER_OT_API=440 builds against the OpenThread API that NCS ships, to test ot_coap_compat.h
+        if api := os.environ.get("COAP_SERVER_OT_API"):
+            cg.add_build_flag(f"-DOPENTHREAD_API_VERSION={int(api)}")
         cg.add_define("USE_COAP_SERVER_PORT", 5683)
         cg.add_define("USE_COAP_SERVER_MAX_CLIENTS", 4)
         # Same value the socket tests set; the tests use both IPv4 and IPv6 peers
