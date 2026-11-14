@@ -71,13 +71,42 @@ class TestableCoapServerOT : public CoapServerOT {
   }
   // As add_coap_resource_() does for each observable resource
   void add_observable() { this->add_observable_resource_(); }
-  ehCoapObserver *observe(ehCoapResource *resource, uint8_t token) {
+  ehCoapObserver *observe(ehCoapResource *resource, uint8_t token, otCoapType type = OT_COAP_TYPE_NON_CONFIRMABLE) {
     otMessageInfo info{};
     otCoapToken t{};
     t.m8[0] = token;
     t.mLength = 1;
-    return this->new_observer_(resource, info, t, OT_COAP_TYPE_NON_CONFIRMABLE);
+    return this->new_observer_(resource, info, t, type);
   }
+  void notify(ehCoapResource *resource) {
+    static const uint8_t PAYLOAD[] = {0xA1, 0x02, 0x01};
+    this->notify_observers_(resource, PAYLOAD, sizeof(PAYLOAD));
+  }
+  bool is_free(const ehCoapObserver *obs) const {
+    for (const ehCoapObserver *cur = this->free_observers_; cur != nullptr; cur = cur->next) {
+      if (cur == obs)
+        return true;
+    }
+    return false;
+  }
+  bool is_releasing(const ehCoapObserver *obs) const {
+    for (const ehCoapObserver *cur = this->release_observers_; cur != nullptr; cur = cur->next) {
+      if (cur == obs)
+        return true;
+    }
+    return false;
+  }
+  ehCoapObserver *take_free_observer() {
+    ehCoapObserver *obs = this->free_observers_;
+    if (obs != nullptr)
+      this->free_observers_ = obs->next;
+    return obs;
+  }
+  void finish_con(ehCoapObserver *obs) {
+    LockGuard lock(this->lock_);
+    this->finish_con_(obs);
+  }
+  uint8_t active_count() const { return this->active_count_; }
   void unobserve(ehCoapObserver *obs) {
     LockGuard lock(this->lock_);
     this->free_observer_(obs);
@@ -348,6 +377,143 @@ TEST(CoapServerOTObserverLimit, FreedNodeIsReusedAtCap) {
 
   EXPECT_EQ(srv.observe(res, 0xFF), first);
   EXPECT_EQ(srv.observer_nodes(), USE_COAP_SERVER_MAX_CLIENTS);
+}
+
+// ---------------------------------------------------------------------------
+// CON notifications: the observer node stays valid while OpenThread holds it as the ACK context
+// ---------------------------------------------------------------------------
+
+// Two observable resources, so the observer limit leaves room for a second node
+struct ConFixture {
+  TestableCoapServerOT srv;
+  TestSensor s;
+  ehCoapResource *res;
+  ehCoapObserver *obs;
+  ConFixture() {
+    s.configure("s");
+    s.state = 1.0f;
+    res = srv.add_resource(ENTITYTYPE_SENSOR, &s, true);
+    srv.add_observable();
+    srv.add_observable();
+    obs = srv.observe(res, 1, OT_COAP_TYPE_CONFIRMABLE);
+  }
+};
+
+TEST(CoapServerOTConNotify, AckClearsPending) {
+  ConFixture f;
+  f.srv.notify(f.res);
+  ASSERT_TRUE(fake_ot::has_pending_request());
+  EXPECT_EQ(fake_ot::pending_request_ctx(), f.obs);
+  EXPECT_TRUE(f.obs->con_pending);
+
+  fake_ot::complete_pending_request(OT_ERROR_NONE);
+
+  EXPECT_FALSE(f.obs->con_pending);
+  EXPECT_EQ(f.srv.active_count(), 1u);
+}
+
+TEST(CoapServerOTConNotify, AckTimeoutFreesObserver) {
+  ConFixture f;
+  f.srv.notify(f.res);
+
+  fake_ot::complete_pending_request(OT_ERROR_RESPONSE_TIMEOUT);
+
+  EXPECT_EQ(f.srv.active_count(), 0u);
+  EXPECT_TRUE(f.srv.is_free(f.obs));
+}
+
+TEST(CoapServerOTConNotify, NodeFreedWhilePendingIsNotReused) {
+  ConFixture f;
+  f.srv.notify(f.res);
+  f.srv.unobserve(f.obs);
+
+  EXPECT_FALSE(f.srv.is_free(f.obs));
+  ehCoapObserver *other = f.srv.observe(f.res, 2, OT_COAP_TYPE_CONFIRMABLE);
+  ASSERT_NE(other, nullptr);
+  EXPECT_NE(other, f.obs);
+
+  // The late timeout for the first observer must not cancel the second
+  fake_ot::complete_pending_request(OT_ERROR_RESPONSE_TIMEOUT);
+
+  EXPECT_TRUE(f.srv.is_free(f.obs));
+  EXPECT_EQ(f.srv.active_count(), 1u);
+  EXPECT_FALSE(f.srv.is_free(other));
+}
+
+TEST(CoapServerOTConNotify, NodeFreedWhilePendingIsReleasedOnAck) {
+  ConFixture f;
+  f.srv.notify(f.res);
+  f.srv.unobserve(f.obs);
+
+  fake_ot::complete_pending_request(OT_ERROR_NONE);
+
+  EXPECT_TRUE(f.srv.is_free(f.obs));
+}
+
+TEST(CoapServerOTConNotify, NoMessageBufferClearsPending) {
+  ConFixture f;
+  fake_ot::fail_next_new_message();
+  f.srv.notify(f.res);
+
+  EXPECT_FALSE(f.obs->con_pending);
+  EXPECT_FALSE(fake_ot::has_pending_request());
+
+  // Later notifications are still sent
+  const int sent = fake_ot::requests_sent();
+  f.srv.notify(f.res);
+  EXPECT_EQ(fake_ot::requests_sent(), sent + 1);
+}
+
+TEST(CoapServerOTConNotify, SendFailureClearsPending) {
+  ConFixture f;
+  fake_ot::fail_next_send();
+  f.srv.notify(f.res);
+
+  EXPECT_FALSE(f.obs->con_pending);
+  EXPECT_FALSE(fake_ot::has_pending_request());
+}
+
+TEST(CoapServerOTConNotify, NonSendFailureKeepsOtherPendingCon) {
+  ConFixture f;
+  f.srv.notify(f.res);  // CON, now pending
+  ASSERT_TRUE(f.obs->con_pending);
+
+  fake_ot::fail_next_send();
+  f.srv.notify(f.res);  // NON, fails
+
+  EXPECT_TRUE(f.obs->con_pending);
+}
+
+TEST(CoapServerOTConNotify, FinishConOnNodeMissingFromReleaseList) {
+  // Not reachable today: a freed node with con_pending set is always on the release list. Covers the guard that
+  // keeps a missing node's next pointer from being linked onto the end of that list.
+  ConFixture f;
+  f.srv.notify(f.res);
+  f.srv.unobserve(f.obs);
+  ASSERT_TRUE(f.srv.is_releasing(f.obs));
+  f.srv.add_free_observer();
+  f.srv.add_free_observer();
+  ehCoapObserver *stray = f.srv.take_free_observer();
+  ASSERT_NE(stray, nullptr);
+  ehCoapObserver *stray_next = stray->next;  // still on the free list
+  ASSERT_NE(stray_next, nullptr);
+  stray->resource = nullptr;
+  stray->con_pending = true;
+
+  f.srv.finish_con(stray);
+
+  EXPECT_FALSE(stray->con_pending);
+  EXPECT_TRUE(f.srv.is_free(stray));
+  EXPECT_TRUE(f.srv.is_releasing(f.obs));  // the release list is left as it was
+  EXPECT_FALSE(f.srv.is_releasing(stray_next));
+}
+
+TEST(CoapServerOTConNotify, TeardownWithNodeAwaitingRelease) {
+  // Leaves a node on the release list for teardown(); AddressSanitizer reports it if it leaks
+  ConFixture f;
+  f.srv.notify(f.res);
+  f.srv.unobserve(f.obs);
+  EXPECT_FALSE(f.srv.is_free(f.obs));
 }
 
 // ---------------------------------------------------------------------------

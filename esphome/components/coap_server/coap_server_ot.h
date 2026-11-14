@@ -77,6 +77,8 @@ class CoapServerOT : public CoapServer {
   ehCoapObserver *new_observer_(ehCoapResource *resource, const otMessageInfo &message_info, const otCoapToken &token,
                                 otCoapType obs_type);
   void free_observer_(ehCoapObserver *observer);
+  // Called with lock_ held once OpenThread no longer holds observer as a CON context
+  void finish_con_(ehCoapObserver *observer);
 
 #ifdef USE_LOGGER
   void flush_logs_();
@@ -114,6 +116,8 @@ class CoapServerOT : public CoapServer {
   std::array<ehCoapClient, USE_COAP_SERVER_MAX_CLIENTS> active_clients_{};
   ehCoapObserver *active_observers_{nullptr};
   ehCoapObserver *free_observers_{nullptr};
+  // Freed while a CON notification was unanswered; not reused until finish_con_()
+  ehCoapObserver *release_observers_{nullptr};
   uint8_t active_count_{0};
   uint8_t high_water_mark_{0};
   mutable Mutex lock_;

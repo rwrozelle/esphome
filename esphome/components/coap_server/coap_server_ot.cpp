@@ -4,6 +4,7 @@
 #include "esphome/core/log.h"
 #include "esphome/components/openthread/openthread.h"
 #include "cbor.h"
+#include <initializer_list>
 #include <openthread/ip6.h>
 
 #ifndef SuccessOrExit
@@ -169,33 +170,30 @@ void CoapServerOT::setup() {
 }  // setup()
 
 bool CoapServerOT::teardown() {
+  // CoAP is stopped first: an unanswered CON notification holds an observer as its context
   {
-    LockGuard lock(this->lock_);
-    for (ehCoapObserver *cur = this->active_observers_; cur != nullptr;) {
-      ehCoapObserver *next = cur->next;
-      delete cur;
-      cur = next;
-    }
-    this->active_observers_ = nullptr;
-    for (ehCoapObserver *cur = this->free_observers_; cur != nullptr;) {
-      ehCoapObserver *next = cur->next;
-      delete cur;
-      cur = next;
-    }
-    this->free_observers_ = nullptr;
-    this->observer_nodes_ = 0;
-  }
-  openthread::InstanceLock lock = openthread::InstanceLock::acquire();
-  otInstance *instance = lock.get_instance();
+    openthread::InstanceLock lock = openthread::InstanceLock::acquire();
+    otInstance *instance = lock.get_instance();
 #if defined(USE_ZEPHYR) && !defined(CONFIG_OPENTHREAD_COAP_BLOCK)
-  otCoapRemoveResource(instance, &this->wk_resource_);
+    otCoapRemoveResource(instance, &this->wk_resource_);
 #else
-  otCoapRemoveBlockWiseResource(instance, &this->wk_bw_resource_);
+    otCoapRemoveBlockWiseResource(instance, &this->wk_bw_resource_);
 #endif
-  for (auto &res : this->resources_)
-    otCoapRemoveResource(instance, &res);
-  otCoapRemoveResource(instance, &this->ping_resource_);
-  otCoapStop(instance);
+    for (auto &res : this->resources_)
+      otCoapRemoveResource(instance, &res);
+    otCoapRemoveResource(instance, &this->ping_resource_);
+    otCoapStop(instance);
+  }
+  LockGuard lock(this->lock_);
+  for (ehCoapObserver **list : {&this->active_observers_, &this->free_observers_, &this->release_observers_}) {
+    for (ehCoapObserver *cur = *list; cur != nullptr;) {
+      ehCoapObserver *next = cur->next;
+      delete cur;
+      cur = next;
+    }
+    *list = nullptr;
+  }
+  this->observer_nodes_ = 0;
   return true;
 }  // teardown()
 
@@ -340,19 +338,14 @@ void CoapServerOT::handle_notification_ack(void *context, otMessage *message, co
     ESP_LOGV(TAG, "Received coap notification ACK");
   } else {
     ESP_LOGI(TAG, "Notification ACK failed: %s, cancelling observer", otThreadErrorToString(error));
-    ehCoapObserver *observer = static_cast<ehCoapObserver *>(context);
-    CoapServerOT *server = nullptr;
-    {
-      LockGuard lock(static_cast<CoapServerOT *>(global_coap_server)->lock_);
-      observer->con_pending = false;
-      if (observer->resource != nullptr) {
-        server = observer->resource->server;
-        if (server != nullptr) {
-          server->free_observer_(observer);
-        }
-      }
-    }
   }
+  // The node stays off the free list while con_pending is set, so context still points at the observer it was sent for
+  ehCoapObserver *observer = static_cast<ehCoapObserver *>(context);
+  auto *server = static_cast<CoapServerOT *>(global_coap_server);
+  LockGuard lock(server->lock_);
+  if (error != OT_ERROR_NONE && observer->resource != nullptr)
+    server->free_observer_(observer);
+  server->finish_con_(observer);
 }
 
 void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *message,
@@ -802,10 +795,15 @@ void CoapServerOT::handle_observer_(ehCoapObserver *observer, ehCoapResource *ex
   otMessage *message = nullptr;
 
   // Snapshot observer state and validate before acquiring the expensive InstanceLock.
+  // Once lock_ is released the node may be freed and reused, so nothing below reads it except through this copy.
+  // A CON send sets con_pending first, which keeps the node off the free list until OpenThread is done with it.
   bool is_con;
   uint32_t serial;
   otCoapToken token;
   otMessageInfo msg_info_copy;
+#ifdef USE_COAP_OSCORE
+  OscoreRequestInfo aad_info{};
+#endif
   {
     LockGuard guard(this->lock_);
     if (observer->resource != expected_resource)
@@ -821,13 +819,21 @@ void CoapServerOT::handle_observer_(ehCoapObserver *observer, ehCoapResource *ex
     serial = observer->observe_serial++;
     token = observer->coap_token;
     msg_info_copy = observer->message_info;
+#ifdef USE_COAP_OSCORE
+    // AAD uses the original registration request's KID/PIV per RFC 8613 §8.3
+    memcpy(aad_info.piv, observer->oscore_req_piv, observer->oscore_req_piv_len);
+    aad_info.piv_len = observer->oscore_req_piv_len;
+    memcpy(aad_info.kid, observer->oscore_req_kid, observer->oscore_req_kid_len);
+    aad_info.kid_len = observer->oscore_req_kid_len;
+#endif
   }
   openthread::InstanceLock lock = openthread::InstanceLock::acquire();
   otInstance *instance = lock.get_instance();
 
   message = otCoapNewMessage(instance, nullptr);
   if (message == nullptr) {
-    return;
+    error = OT_ERROR_NO_BUFS;
+    goto exit;
   }
   SuccessOrExit(error = coap_message_init(message, is_con ? OT_COAP_TYPE_CONFIRMABLE : OT_COAP_TYPE_NON_CONFIRMABLE,
                                           OT_COAP_CODE_CONTENT));
@@ -837,12 +843,6 @@ void CoapServerOT::handle_observer_(ehCoapObserver *observer, ehCoapResource *ex
   {
     uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
     size_t inner_len = oscore_build_inner_cbor(0x45, payload, payload_len, inner);
-    // AAD uses the original registration request's KID/PIV per RFC 8613 §8.3
-    OscoreRequestInfo aad_info{};
-    memcpy(aad_info.piv, observer->oscore_req_piv, observer->oscore_req_piv_len);
-    aad_info.piv_len = observer->oscore_req_piv_len;
-    memcpy(aad_info.kid, observer->oscore_req_kid, observer->oscore_req_kid_len);
-    aad_info.kid_len = observer->oscore_req_kid_len;
     uint8_t ciphertext[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
     size_t cipher_len =
         this->oscore_protect_response_(inner, inner_len, aad_info, true, ciphertext, sizeof(ciphertext));
@@ -868,12 +868,30 @@ void CoapServerOT::handle_observer_(ehCoapObserver *observer, ehCoapResource *ex
 exit:
   if (error != OT_ERROR_NONE) {
     ESP_LOGE(TAG, "coap send message error %d: %s", error, otThreadErrorToString(error));
-    observer->con_pending = false;
+    if (is_con) {
+      // Not sent, so OpenThread will not call handle_notification_ack for it
+      LockGuard guard(this->lock_);
+      this->finish_con_(observer);
+    }
     if (message != nullptr) {
       otMessageFree(message);
     }
   }
 }  // handle_observer
+
+void CoapServerOT::finish_con_(ehCoapObserver *observer) {
+  observer->con_pending = false;
+  if (observer->resource != nullptr)
+    return;  // still subscribed
+  // Freed while the CON was outstanding: move it from the release list to the free list
+  ehCoapObserver **pp = &this->release_observers_;
+  while (*pp != nullptr && *pp != observer)
+    pp = &(*pp)->next;
+  if (*pp == observer)
+    *pp = observer->next;
+  observer->next = this->free_observers_;
+  this->free_observers_ = observer;
+}
 
 // used by add_coap_resource_
 void CoapServerOT::add_coap_resource_(EntityType type, EntityBase *entity, bool observable, uint16_t &senml_index) {
@@ -1217,6 +1235,12 @@ void CoapServerOT::free_observer_(ehCoapObserver *observer) {
     }
   }
   observer->resource = nullptr;
+  if (observer->con_pending) {
+    // OpenThread still holds it as the context of an unanswered CON; finish_con_() frees it later
+    observer->next = this->release_observers_;
+    this->release_observers_ = observer;
+    return;
+  }
   observer->next = this->free_observers_;
   this->free_observers_ = observer;
 }

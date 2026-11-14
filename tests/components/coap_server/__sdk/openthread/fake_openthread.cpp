@@ -49,6 +49,11 @@ bool g_response_block2_more = false;
 int g_response_block2_szx = 0;
 int g_request_block2_szx = -1;
 otCoapOption g_block2_option{OT_COAP_OPTION_BLOCK2, 1};
+otCoapResponseHandler g_request_handler = nullptr;
+void *g_request_ctx = nullptr;
+int g_requests_sent = 0;
+bool g_fail_next_new_message = false;
+bool g_fail_next_send = false;
 
 }  // namespace
 
@@ -65,6 +70,11 @@ void reset() {
   g_response_block2_more = false;
   g_response_block2_szx = 0;
   g_request_block2_szx = -1;
+  g_request_handler = nullptr;
+  g_request_ctx = nullptr;
+  g_requests_sent = 0;
+  g_fail_next_new_message = false;
+  g_fail_next_send = false;
 }
 
 std::string last_response() {
@@ -79,6 +89,19 @@ uint32_t response_block2_num() { return g_response_block2_num; }
 bool response_block2_more() { return g_response_block2_more; }
 int response_block2_szx() { return g_response_block2_szx; }
 void set_request_block2(int szx) { g_request_block2_szx = szx; }
+int requests_sent() { return g_requests_sent; }
+bool has_pending_request() { return g_request_handler != nullptr; }
+void *pending_request_ctx() { return g_request_ctx; }
+void complete_pending_request(otError error) {
+  otCoapResponseHandler handler = g_request_handler;
+  void *ctx = g_request_ctx;
+  g_request_handler = nullptr;
+  g_request_ctx = nullptr;
+  if (handler != nullptr)
+    handler(ctx, nullptr, nullptr, error);
+}
+void fail_next_new_message() { g_fail_next_new_message = true; }
+void fail_next_send() { g_fail_next_send = true; }
 
 }  // namespace esphome::coap_server::testing::fake_ot
 
@@ -92,6 +115,10 @@ void otCoapAddBlockWiseResource(otInstance * /*instance*/, otCoapBlockwiseResour
 void otCoapRemoveBlockWiseResource(otInstance * /*instance*/, otCoapBlockwiseResource * /*resource*/) {}
 
 otMessage *otCoapNewMessage(otInstance * /*instance*/, const otMessageInfo * /*info*/) {
+  if (g_fail_next_new_message) {
+    g_fail_next_new_message = false;
+    return nullptr;
+  }
   return reinterpret_cast<otMessage *>(alloc_message());
 }
 
@@ -269,8 +296,18 @@ otError otCoapSendResponseBlockWise(otInstance * /*instance*/, otMessage *msg, c
   return OT_ERROR_NONE;
 }
 
+// Keeps the response handler of the last request with one, as OpenThread does until the request is answered
 otError otCoapSendRequest(otInstance * /*instance*/, otMessage * /*msg*/, const otMessageInfo * /*info*/,
-                          otCoapResponseHandler /*handler*/, void * /*ctx*/) {
+                          otCoapResponseHandler handler, void *ctx) {
+  if (g_fail_next_send) {
+    g_fail_next_send = false;
+    return OT_ERROR_NO_BUFS;
+  }
+  g_requests_sent++;
+  if (handler != nullptr) {
+    g_request_handler = handler;
+    g_request_ctx = ctx;
+  }
   return OT_ERROR_NONE;
 }
 

@@ -25,4 +25,15 @@ int response_block2_szx();
 // Makes the next request carry Block2(NUM=0, SZX=szx); -1 for no Block2 option
 void set_request_block2(int szx);
 
+// Requests sent with otCoapSendRequest (notifications, pings)
+int requests_sent();
+// The last request sent with a response handler, until it is completed
+bool has_pending_request();
+void *pending_request_ctx();
+// Calls the pending request's response handler with error, as OpenThread does on an ACK, RST or timeout
+void complete_pending_request(otError error);
+// Makes the next otCoapNewMessage or otCoapSendRequest fail
+void fail_next_new_message();
+void fail_next_send();
+
 }  // namespace esphome::coap_server::testing::fake_ot
