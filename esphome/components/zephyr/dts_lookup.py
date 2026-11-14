@@ -14,7 +14,7 @@ from typing import Any, Final
 
 import yaml
 
-from esphome.core import CORE
+from esphome.core import CORE, EsphomeError
 
 from .board_revision import default_revision, parse_board_string, resolve_revision
 from .const import (
@@ -348,3 +348,79 @@ def _iter_nodes(edt: Any) -> Iterator[Any]:
             yield from scc
         else:
             yield scc
+
+
+def _lookup_bus_labels_by_property_match(
+    board: str, property_label: str
+) -> list[str] | None:
+    """Labels of the nodes whose binding says ``bus: <property_label>``, enabled
+    ones first, or None when the devicetree can't be read; vendors name these nodes
+    too differently for a label pattern."""
+    edt = _get_edt(board)
+    if edt is None:
+        return None
+
+    enabled: list[str] = []
+    disabled: list[str] = []
+    for node in _iter_nodes(edt):
+        if property_label in node.buses and node.labels:
+            (enabled if node.status == "okay" else disabled).append(node.labels[0])
+
+    result = sorted(set(enabled)) + sorted(set(disabled) - set(enabled))
+    _LOGGER.debug(
+        "Nodes with bus '%s' on board '%s': %s", property_label, board, result
+    )
+    return result
+
+
+def get_console_uart_label(board: str) -> str | None:
+    """The label of the board's ``zephyr,console`` UART, which is UART0, or None."""
+    edt = _get_edt(board)
+    if edt is None:
+        return None
+    node = edt.chosen_node("zephyr,console")
+    if node is None or not node.labels:
+        return None
+    return node.labels[0]
+
+
+def get_uart_controller_labels(board: str) -> list[str] | None:
+    """The board's UART labels, enabled ones first, or None when the devicetree
+    can't be read."""
+    return _lookup_bus_labels_by_property_match(board, "uart")
+
+
+def _discover_uart_node_labels(board: str) -> dict[str, str] | None:
+    """UART0, UART1, ... mapped to the board's labels. UART0 is the console; the
+    others follow by label, enabled ones first, so they are not the hardware
+    numbers and can shift when a board file enables another UART."""
+    console = get_console_uart_label(board)
+    if console is None:
+        return None
+    others = [
+        label for label in (get_uart_controller_labels(board) or []) if label != console
+    ]
+    mapping = {"UART0": console}
+    mapping.update({f"UART{i + 1}": label for i, label in enumerate(others)})
+    return mapping
+
+
+def resolve_uart_node_label(board: str, hw_uart: str) -> str:
+    """The devicetree label of ``hw_uart`` ("UART0", "UART1", ...) on ``board``.
+    Runs during code generation, so it raises EsphomeError."""
+    mapping = _discover_uart_node_labels(board)
+    if mapping is None:
+        raise EsphomeError(
+            f"Cannot determine the console UART for board '{board}': its devicetree "
+            "has no zephyr,console UART, or couldn't be read (see the warning above)"
+        )
+    label = mapping.get(hw_uart)
+    if label is None:
+        others = [v for k, v in mapping.items() if k != "UART0"]
+        raise EsphomeError(
+            f"Board '{board}' has no '{hw_uart}': besides its console "
+            f"({mapping['UART0']}), its devicetree has {len(others)} other "
+            f"UART(s): {', '.join(others) or 'none'}"
+        )
+    _LOGGER.info("%s on board '%s' is %s", hw_uart, board, label)
+    return label

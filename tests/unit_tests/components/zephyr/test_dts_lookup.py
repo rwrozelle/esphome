@@ -27,8 +27,11 @@ from esphome.components.zephyr.dts_lookup import (
     _get_dts_include_paths,
     _get_edt,
     _iter_nodes,
+    get_console_uart_label,
+    get_uart_controller_labels,
+    resolve_uart_node_label,
 )
-from esphome.core import CORE
+from esphome.core import CORE, EsphomeError
 
 
 @pytest.fixture(autouse=True)
@@ -712,3 +715,123 @@ def test_dts_include_paths_of_a_bare_tree(tmp_path: Path) -> None:
 def test_iter_nodes_flattens_scc_order() -> None:
     edt = SimpleNamespace(scc_order=["a", ["b", "c"], "d"])
     assert list(_iter_nodes(edt)) == ["a", "b", "c", "d"]
+
+
+class _FakeNode:
+    def __init__(
+        self,
+        labels: list[str],
+        buses: list[str] | None = None,
+        status: str = "okay",
+    ) -> None:
+        self.labels = labels
+        self.buses = buses or []
+        self.status = status
+
+
+class _FakeEdt:
+    def __init__(self, nodes: list[_FakeNode], console: _FakeNode | None) -> None:
+        self.scc_order = nodes
+        self._console = console
+
+    def chosen_node(self, name: str) -> _FakeNode | None:
+        return self._console if name == "zephyr,console" else None
+
+
+def _uart(label: str, status: str = "okay") -> _FakeNode:
+    return _FakeNode([label], ["uart"], status)
+
+
+@pytest.fixture
+def board_edt(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """Give every board the devicetree passed in, with ``console`` as zephyr,console."""
+
+    def _set(nodes: list[_FakeNode], console: _FakeNode | None = None) -> None:
+        edt = _FakeEdt(nodes, console)
+        monkeypatch.setattr(dts_lookup, "_get_edt", lambda board: edt)
+
+    return _set
+
+
+@pytest.fixture
+def no_edt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dts_lookup, "_get_edt", lambda board: None)
+
+
+def test_uart_controller_labels_enabled_first(board_edt: Callable[..., None]) -> None:
+    board_edt(
+        [
+            _uart("usart3", "disabled"),
+            _uart("usart2"),
+            _uart("lpuart1"),
+            _uart("usart1", "disabled"),
+            # Not a UART, and a UART node without a label
+            _FakeNode(["i2c1"], ["i2c"]),
+            _FakeNode([], ["uart"]),
+        ]
+    )
+    assert get_uart_controller_labels("nucleo_c5a3zg") == [
+        "lpuart1",
+        "usart2",
+        "usart1",
+        "usart3",
+    ]
+
+
+@pytest.mark.usefixtures("no_edt")
+def test_lookups_without_a_devicetree() -> None:
+    assert get_uart_controller_labels("nucleo_c5a3zg") is None
+    assert get_console_uart_label("nucleo_c5a3zg") is None
+
+
+@pytest.mark.parametrize(
+    ("console", "expected"),
+    [(_uart("usart2"), "usart2"), (_FakeNode([]), None), (None, None)],
+)
+def test_console_uart_label(
+    board_edt: Callable[..., None], console: _FakeNode | None, expected: str | None
+) -> None:
+    board_edt([], console)
+    assert get_console_uart_label("nucleo_c5a3zg") == expected
+
+
+@pytest.mark.parametrize(
+    ("hw_uart", "label"),
+    [("UART0", "usart2"), ("UART1", "lpuart1"), ("UART2", "usart1")],
+)
+def test_resolve_uart_node_label_counts_from_the_console(
+    board_edt: Callable[..., None], hw_uart: str, label: str
+) -> None:
+    """UART0 is the console whatever its name; the others follow, enabled first."""
+    console = _uart("usart2")
+    board_edt([_uart("usart1", "disabled"), console, _uart("lpuart1")], console)
+    assert resolve_uart_node_label("nucleo_c5a3zg", hw_uart) == label
+
+
+def test_resolve_uart_node_label_rejects_a_missing_uart(
+    board_edt: Callable[..., None],
+) -> None:
+    console = _uart("usart2")
+    board_edt([console, _uart("lpuart1")], console)
+    with pytest.raises(
+        EsphomeError, match=r"no 'UART2': .*\(usart2\), .* 1 other UART\(s\): lpuart1"
+    ):
+        resolve_uart_node_label("nucleo_c5a3zg", "UART2")
+
+
+def test_resolve_uart_node_label_on_a_board_with_only_the_console(
+    board_edt: Callable[..., None],
+) -> None:
+    console = _uart("usart2")
+    board_edt([console], console)
+    with pytest.raises(EsphomeError, match=r"0 other UART\(s\): none"):
+        resolve_uart_node_label("nucleo_c5a3zg", "UART1")
+
+
+@pytest.mark.parametrize("console", [None, _FakeNode([])])
+def test_resolve_uart_node_label_needs_the_console(
+    board_edt: Callable[..., None], console: _FakeNode | None
+) -> None:
+    board_edt([_uart("usart1")], console)
+    with pytest.raises(EsphomeError, match="Cannot determine the console UART"):
+        resolve_uart_node_label("nucleo_c5a3zg", "UART0")
