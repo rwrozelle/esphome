@@ -252,6 +252,30 @@ TEST(EntityCommands, TruncatedPayloadIgnored) {
   EXPECT_FALSE(sw.state);
 }
 
+TEST(EntityCommands, InvalidKeyItemIgnored) {
+  TestSwitch sw;
+  sw.configure("sw");
+  CommandServer srv(ENTITYTYPE_SWITCH, &sw);
+  const uint8_t payload[] = {0xA1, 0xFF, 0xF5};  // map with a key that cannot be skipped
+
+  srv.post("fp/1/g/1", payload, sizeof(payload));
+
+  EXPECT_FALSE(sw.state);
+  EXPECT_EQ(srv.response_code(), 0x44u);
+}
+
+TEST(EntityCommands, InvalidValueItemIgnored) {
+  TestSwitch sw;
+  sw.configure("sw");
+  CommandServer srv(ENTITYTYPE_SWITCH, &sw);
+  const uint8_t payload[] = {0xA1, 0x01, 0xFF};  // {1: <item that cannot be skipped>}
+
+  srv.post("fp/1/g/1", payload, sizeof(payload));
+
+  EXPECT_FALSE(sw.state);
+  EXPECT_EQ(srv.response_code(), 0x44u);
+}
+
 TEST(EntityCommands, EmptyPayloadIgnored) {
   TestSwitch sw;
   sw.configure("sw");

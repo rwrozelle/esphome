@@ -230,8 +230,8 @@ void CoapServer::apply_entity_post(EntityBase *entity, EntityType type, ActionTy
   while (!cbor_value_at_end(&map_val)) {
     int key = 0;
     bool key_ok = cbor_value_get_int(&map_val, &key) == CBOR_NO_ERROR;
-    cbor_value_advance(&map_val);
-    if (cbor_value_at_end(&map_val))
+    // A failed advance does not move the position, so continuing would loop forever
+    if (cbor_value_advance(&map_val) != CBOR_NO_ERROR || cbor_value_at_end(&map_val))
       break;
     switch (type) {
 #ifdef USE_SWITCH
@@ -313,7 +313,8 @@ void CoapServer::apply_entity_post(EntityBase *entity, EntityType type, ActionTy
       default:
         break;
     }
-    cbor_value_advance(&map_val);
+    if (cbor_value_advance(&map_val) != CBOR_NO_ERROR)
+      break;
   }
 }
 
