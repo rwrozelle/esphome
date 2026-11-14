@@ -547,26 +547,11 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
   const uint8_t *payload_ptr = pkt.payload;
   uint16_t payload_len = pkt.payload_len;
   if (oscore_protected) {
-    // extract payload from inner plaintext: skip code + options
-    uint8_t inner_pos = 1;
-    while (inner_pos < oscore_plain_len) {
-      uint8_t dl = this->oscore_plain_[inner_pos++];
-      if (dl == 0xFF)
-        break;
-      uint8_t od = (dl >> 4) & 0x0F;
-      uint8_t ol = dl & 0x0F;
-      if (od == 13) {
-        inner_pos++;
-      } else if (od == 14) {
-        inner_pos += 2;
-      }
-      if (ol == 13) {
-        inner_pos++;
-      } else if (ol == 14) {
-        inner_pos += 2;
-      } else {
-        inner_pos += ol;
-      }
+    size_t inner_pos = 0;
+    if (!oscore_inner_payload_offset(this->oscore_plain_, oscore_plain_len, &inner_pos)) {
+      this->builder_.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);  // 4.00
+      this->send_response(this->builder_.buf, this->builder_.pos, &peer);
+      return;
     }
     payload_ptr = this->oscore_plain_ + inner_pos;
     payload_len = (uint16_t) (oscore_plain_len - inner_pos);
@@ -637,8 +622,10 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
         send_response(this->builder_.buf, this->builder_.pos, &peer);
         return;
       }
-      this->builder_.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
-      if (resource->observable && observer != nullptr && pkt.observe == 0)
+      // Outer code 2.04, or 2.05 when the reply carries Observe (RFC 8613 §4.1.3.5)
+      const bool with_observe = resource->observable && observer != nullptr && pkt.observe == 0;
+      this->builder_.begin(resp_type(pkt.type), with_observe ? 0x45 : 0x44, pkt.message_id, pkt.token, pkt.token_len);
+      if (with_observe)
         this->builder_.option_uint(6, observer->observe_serial++);
       this->builder_.option_empty(9);  // OSCORE option empty
       this->builder_.payload_marker();

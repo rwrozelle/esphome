@@ -30,6 +30,7 @@ struct ehCoapObserver : CoapObserverBase {
   otMessageInfo message_info;
   otCoapToken coap_token;
   otCoapType obs_type{OT_COAP_TYPE_NON_CONFIRMABLE};
+  uint32_t notify_round{0};  // the notify_observers_() call that last picked it, see notify_round_
 };
 
 // OpenThread transport — uses otInstance, otCoapResource, observer linked list
@@ -120,6 +121,7 @@ class CoapServerOT : public CoapServer {
   ehCoapObserver *release_observers_{nullptr};
   uint8_t active_count_{0};
   uint8_t high_water_mark_{0};
+  uint32_t notify_round_{0};
   mutable Mutex lock_;
 
 #ifdef USE_COAP_OSCORE

@@ -378,27 +378,16 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
   // We only need to extract the payload here; code/options are handled below.
   const bool oscore_protected = (oscore_plain_len > 0);
   if (oscore_protected) {
-    // Skip code byte and options to find payload
-    uint8_t inner_pos = 1;  // skip code
-    while (inner_pos < oscore_plain_len) {
-      uint8_t delta_len = oscore_plain[inner_pos++];
-      if (delta_len == 0xFF)
-        break;
-      uint8_t opt_delta = (delta_len >> 4) & 0x0F;
-      uint8_t opt_len_field = delta_len & 0x0F;
-      if (opt_delta == 13)
-        inner_pos++;
-      else if (opt_delta == 14)
-        inner_pos += 2;
-      if (opt_len_field == 13)
-        inner_pos++;
-      else if (opt_len_field == 14)
-        inner_pos += 2;
-      else
-        inner_pos += opt_len_field;
+    size_t inner_pos = 0;
+    if (!oscore_inner_payload_offset(oscore_plain, oscore_plain_len, &inner_pos)) {
+      response = otCoapNewMessage(instance, nullptr);
+      if (response) {
+        otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_BAD_REQUEST);
+        otCoapSendResponse(instance, response, message_info);
+      }
+      return;
     }
-    // inner_pos now points to start of inner payload (after 0xFF marker)
-    msg_offset = inner_pos;
+    msg_offset = (uint16_t) inner_pos;
     msg_len = (uint16_t) (oscore_plain_len - inner_pos);
   }
 #endif  // USE_COAP_OSCORE
@@ -508,9 +497,11 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
         SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
         goto exit;
       }
-      // Outer: 2.04 Changed + OSCORE option (empty for simple response) + ciphertext
-      SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
-      if (resource->observable && observer != nullptr && observe_option_present && observe == 0)
+      // Outer: 2.04 Changed, or 2.05 Content when it carries Observe (RFC 8613 §4.1.3.5), + empty OSCORE option
+      const bool with_observe = resource->observable && observer != nullptr && observe_option_present && observe == 0;
+      SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message),
+                                                      with_observe ? OT_COAP_CODE_CONTENT : OT_COAP_CODE_CHANGED));
+      if (with_observe)
         SuccessOrExit(error = otCoapMessageAppendObserveOption(response, observer->observe_serial++));
       SuccessOrExit(error = otCoapMessageAppendOption(response, 9, 0, nullptr));  // OSCORE option, empty
       SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
@@ -1265,29 +1256,30 @@ void CoapServerOT::notify_observers_(ehCoapResource *resource, const uint8_t *pa
     ehCoapObserver *observer;
     ehCoapResource *resource;
   };
-  // One observer per client per resource at most, so USE_COAP_SERVER_MAX_CLIENTS is a tight bound.
+  // Collected in batches; a resource can have more observers than one batch holds. Each observer is stamped with
+  // this round under the lock, so a later batch neither repeats nor misses one when the list changes in between.
   Pending pending[USE_COAP_SERVER_MAX_CLIENTS];
-  size_t pending_count = 0;
-  size_t skipped = 0;
-  {
-    LockGuard lock(this->lock_);
-    for (ehCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
-      if (obs->resource == resource) {
-        if (pending_count < USE_COAP_SERVER_MAX_CLIENTS) {
+  const uint32_t round = ++this->notify_round_;
+  size_t total = 0;
+  size_t pending_count;
+  do {
+    pending_count = 0;
+    {
+      LockGuard lock(this->lock_);
+      for (ehCoapObserver *obs = this->active_observers_; obs != nullptr && pending_count < USE_COAP_SERVER_MAX_CLIENTS;
+           obs = obs->next) {
+        if (obs->resource == resource && obs->notify_round != round) {
+          obs->notify_round = round;
           pending[pending_count++] = {obs, obs->resource};
-        } else {
-          skipped++;
         }
       }
     }
-  }
+    for (size_t i = 0; i < pending_count; i++)
+      this->handle_observer_(pending[i].observer, pending[i].resource, payload, payload_len);
+    total += pending_count;
+  } while (pending_count == USE_COAP_SERVER_MAX_CLIENTS);
   // Logged outside lock_: on the main loop the log callback runs at once and takes lock_
-  ESP_LOGV(TAG, "Found %u observers: /%s", (unsigned) (pending_count + skipped), resource->path);
-  if (skipped > 0) {
-    ESP_LOGW(TAG, "Observer notify limit reached, skipped %u", (unsigned) skipped);
-  }
-  for (size_t i = 0; i < pending_count; i++)
-    this->handle_observer_(pending[i].observer, pending[i].resource, payload, payload_len);
+  ESP_LOGV(TAG, "Notified %u observers: /%s", (unsigned) total, resource->path);
 }
 
 void CoapServerOT::on_entity_update(EntityBase *entity) {

@@ -437,6 +437,24 @@ TEST(CoapServerOTObserverLimit, RefusedAtCap) {
   EXPECT_EQ(srv.observer_nodes(), USE_COAP_SERVER_MAX_CLIENTS);
 }
 
+TEST(CoapServerOTObserverLimit, AllObserversOfAResourceAreNotified) {
+  // More observers on one resource than a notification batch holds
+  TestableCoapServerOT srv;
+  TestSensor s;
+  s.configure("s");
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_SENSOR, &s, true);
+  srv.add_observable();
+  srv.add_observable();
+  const int observers = USE_COAP_SERVER_MAX_CLIENTS + 1;
+  for (int i = 0; i < observers; i++)
+    ASSERT_NE(srv.observe(res, static_cast<uint8_t>(i)), nullptr);
+
+  const int before = fake_ot::requests_sent();
+  srv.notify(res);
+
+  EXPECT_EQ(fake_ot::requests_sent() - before, observers);
+}
+
 TEST(CoapServerOTObserverLimit, FreedNodeIsReusedAtCap) {
   TestableCoapServerOT srv;
   TestSensor s;

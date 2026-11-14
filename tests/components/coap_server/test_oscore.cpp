@@ -48,6 +48,9 @@ class OscoreServer : public TestableCoapServerNet {
                                         plaintext_len, req);
   }
   uint8_t notify_option(uint8_t *buf) { return this->oscore_build_notify_option_(buf); }
+  static bool inner_payload(const std::vector<uint8_t> &plain, size_t *offset) {
+    return oscore_inner_payload_offset(plain.data(), plain.size(), offset);
+  }
   static size_t build_inner(const uint8_t *payload, size_t payload_len, uint8_t *out, size_t out_size) {
     return oscore_build_inner_cbor(0x45, payload, payload_len, out, out_size);
   }
@@ -141,6 +144,50 @@ TEST(OscoreKeys, KeyMaterialClearedAfterDerivation) {
 // ---------------------------------------------------------------------------
 // Partial IV, nonce and AAD
 // ---------------------------------------------------------------------------
+
+// Inner option walk (RFC 7252 §3.1): code, options, 0xFF, payload
+
+TEST(OscoreInnerPayload, NoOptions) {
+  size_t offset = 0;
+  ASSERT_TRUE(OscoreServer::inner_payload({0x02, 0xFF, 0xA1}, &offset));
+  EXPECT_EQ(offset, 2u);
+}
+
+TEST(OscoreInnerPayload, NoPayload) {
+  size_t offset = 0;
+  ASSERT_TRUE(OscoreServer::inner_payload({0x01, 0xC1, 0x3C}, &offset));  // Content-Format only
+  EXPECT_EQ(offset, 3u);
+}
+
+TEST(OscoreInnerPayload, OneByteExtendedLengthSkipsValue) {
+  // Uri-Path (11) with length 13 + 1 = 14
+  std::vector<uint8_t> plain{0x02, 0xBD, 0x01};
+  plain.insert(plain.end(), 14, 'x');
+  plain.insert(plain.end(), {0xFF, 0xA1});
+  size_t offset = 0;
+  ASSERT_TRUE(OscoreServer::inner_payload(plain, &offset));
+  EXPECT_EQ(offset, plain.size() - 1);
+}
+
+TEST(OscoreInnerPayload, TwoByteExtendedLengthAndDelta) {
+  // Option delta 14 (+2 bytes) and length 14: 269 + 1 = 270
+  std::vector<uint8_t> plain{0x02, 0xEE, 0x00, 0x00, 0x00, 0x01};
+  plain.insert(plain.end(), 270, 'x');
+  plain.insert(plain.end(), {0xFF, 0xA1});
+  size_t offset = 0;
+  ASSERT_TRUE(OscoreServer::inner_payload(plain, &offset));
+  EXPECT_EQ(offset, plain.size() - 1);
+}
+
+TEST(OscoreInnerPayload, MalformedIsRejected) {
+  size_t offset = 0;
+  EXPECT_FALSE(OscoreServer::inner_payload({0x02, 0xB5, 'a', 'b'}, &offset));  // value runs past the end
+  EXPECT_FALSE(OscoreServer::inner_payload({0x02, 0xBD}, &offset));            // extended length missing
+  EXPECT_FALSE(OscoreServer::inner_payload({0x02, 0xBE, 0x00}, &offset));      // half a 2-byte length
+  EXPECT_FALSE(OscoreServer::inner_payload({0x02, 0xD1}, &offset));            // extended delta missing
+  EXPECT_FALSE(OscoreServer::inner_payload({0x02, 0xF0}, &offset));            // delta 15 is reserved
+  EXPECT_FALSE(OscoreServer::inner_payload({0x02, 0x0F}, &offset));            // length 15 is reserved
+}
 
 TEST(OscoreInner, FitsExactly) {
   const uint8_t payload[] = {0xA1, 0x02, 0x01};
@@ -522,6 +569,101 @@ TEST_F(OscoreTest, ProtectedPostIsAppliedAndAnsweredEncrypted) {
   const uint8_t state[] = {0xA1, 0x04, 0xF5};
   EXPECT_EQ(std::vector<uint8_t>(plain + plain_len - sizeof(state), plain + plain_len),
             std::vector<uint8_t>(state, state + sizeof(state)));
+}
+
+TEST_F(OscoreTest, ProtectedPostWithLongInnerOptionFindsPayload) {
+  this->srv_.init_resources(4);
+  TestSwitch sw;
+  sw.configure("relay");
+  uint16_t idx = 1;
+  this->srv_.add_resource(ENTITYTYPE_SWITCH, &sw, true, idx, false);
+
+  const uint8_t piv[] = {0x2D};
+  const uint8_t opt[] = {0x09, 0x2D};
+  // POST, a 14-byte option (1-byte extended length), then {4: true}
+  std::vector<uint8_t> inner{0x02, 0xBD, 0x01};
+  inner.insert(inner.end(), 14, 'x');
+  inner.insert(inner.end(), {0xFF, 0xA1, 0x04, 0xF5});
+  uint8_t ciphertext[256];
+  size_t cipher_len = 0;
+  ASSERT_TRUE(client_encrypt(this->srv_, piv, sizeof(piv), inner.data(), inner.size(), ciphertext, &cipher_len));
+
+  this->srv_.inject(make_oscore_post("fp/1/g/1", opt, sizeof(opt), ciphertext, cipher_len), make_peer());
+
+  EXPECT_TRUE(sw.state);
+}
+
+TEST_F(OscoreTest, ProtectedPostWithMalformedInnerIsRejected) {
+  this->srv_.init_resources(4);
+  TestSwitch sw;
+  sw.configure("relay");
+  uint16_t idx = 1;
+  this->srv_.add_resource(ENTITYTYPE_SWITCH, &sw, true, idx, false);
+
+  const uint8_t piv[] = {0x2E};
+  const uint8_t opt[] = {0x09, 0x2E};
+  const uint8_t inner[] = {0x02, 0xB9, 'a'};  // option value runs past the end
+  uint8_t ciphertext[256];
+  size_t cipher_len = 0;
+  ASSERT_TRUE(client_encrypt(this->srv_, piv, sizeof(piv), inner, sizeof(inner), ciphertext, &cipher_len));
+
+  this->srv_.inject(make_oscore_post("fp/1/g/1", opt, sizeof(opt), ciphertext, cipher_len), make_peer());
+
+  ASSERT_GE(this->srv_.last_sent.size(), 2u);
+  EXPECT_EQ(this->srv_.last_sent[1], 0x80u);  // 4.00 Bad Request
+  EXPECT_FALSE(sw.state);
+}
+
+// NON POST as make_oscore_post(), with an Observe option (6) set to observe before the OSCORE option
+std::vector<uint8_t> make_oscore_observe(const char *path, uint8_t observe, const uint8_t *opt, uint8_t opt_len,
+                                         const uint8_t *ciphertext, size_t cipher_len) {
+  std::vector<uint8_t> pkt{0x51, 0x02, 0x00, 0x08, 0xCD};
+  pkt.push_back(0x61);  // Observe (6), length 1
+  pkt.push_back(observe);
+  pkt.push_back(static_cast<uint8_t>(((9 - 6) << 4) | opt_len));  // OSCORE (9)
+  pkt.insert(pkt.end(), opt, opt + opt_len);
+  append_uri_path(pkt, path, 9);
+  pkt.push_back(0xFF);
+  pkt.insert(pkt.end(), ciphertext, ciphertext + cipher_len);
+  return pkt;
+}
+
+// Sends a protected inner GET for a sensor, with or without an Observe registration; returns the outer reply code
+int protected_get_reply_code(OscoreServer &srv, bool observe, uint8_t piv_byte) {
+  const uint8_t piv[] = {piv_byte};
+  const uint8_t opt[] = {0x09, piv_byte};
+  const uint8_t inner[] = {0x01};  // GET
+  uint8_t ciphertext[256];
+  size_t cipher_len = 0;
+  if (!client_encrypt(srv, piv, sizeof(piv), inner, sizeof(inner), ciphertext, &cipher_len))
+    return -1;
+  srv.inject(observe ? make_oscore_observe("fp/1/g/1", 0, opt, sizeof(opt), ciphertext, cipher_len)
+                     : make_oscore_post("fp/1/g/1", opt, sizeof(opt), ciphertext, cipher_len),
+             make_peer());
+  return srv.last_sent.size() >= 2 ? srv.last_sent[1] : -1;
+}
+
+TEST_F(OscoreTest, ProtectedObserveRegistrationRepliesWithOuterContent) {
+  this->srv_.init_resources(2);
+  TestSensor s;
+  s.configure("temp");
+  s.state = 21.5f;
+  uint16_t idx = 1;
+  this->srv_.add_resource(ENTITYTYPE_SENSOR, &s, true, idx, false);
+
+  EXPECT_EQ(protected_get_reply_code(this->srv_, true, 0x30), 0x45);  // 2.05, as it carries Observe
+  EXPECT_EQ(this->srv_.active_observer_count(), 1u);
+}
+
+TEST_F(OscoreTest, ProtectedGetWithoutObserveRepliesWithOuterChanged) {
+  this->srv_.init_resources(2);
+  TestSensor s;
+  s.configure("temp");
+  s.state = 21.5f;
+  uint16_t idx = 1;
+  this->srv_.add_resource(ENTITYTYPE_SENSOR, &s, true, idx, false);
+
+  EXPECT_EQ(protected_get_reply_code(this->srv_, false, 0x31), 0x44);  // 2.04
 }
 
 // The outer code of a protected request is always POST, so the button must act on the inner code

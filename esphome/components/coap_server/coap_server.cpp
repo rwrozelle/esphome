@@ -615,6 +615,43 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
 }
 
 // static
+bool CoapServer::oscore_inner_payload_offset(const uint8_t *plain, size_t len, size_t *offset) {
+  size_t pos = 1;  // after the code
+  while (pos < len) {
+    const uint8_t header = plain[pos++];
+    if (header == 0xFF) {
+      *offset = pos;
+      return true;
+    }
+    const uint8_t delta = header >> 4;
+    size_t value_len = header & 0x0F;
+    if (delta == 15 || value_len == 15)
+      return false;
+    if (delta == 13) {
+      pos += 1;
+    } else if (delta == 14) {
+      pos += 2;
+    }
+    if (value_len == 13) {
+      if (pos + 1 > len)
+        return false;
+      value_len = plain[pos] + 13;
+      pos += 1;
+    } else if (value_len == 14) {
+      if (pos + 2 > len)
+        return false;
+      value_len = encode_uint16(plain[pos], plain[pos + 1]) + 269;
+      pos += 2;
+    }
+    if (pos > len || value_len > len - pos)
+      return false;
+    pos += value_len;
+  }
+  *offset = len;
+  return true;
+}
+
+// static
 size_t CoapServer::oscore_build_inner_cbor(uint8_t code, const uint8_t *payload, size_t payload_len, uint8_t *out,
                                            size_t out_size) {
   if (out_size < 4 || payload_len > out_size - 4)
@@ -803,6 +840,14 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
     memcpy(p, s, n);
     p += n;
   };
+  // Text from the entity goes inside a quoted-string, where '"' and '\' need a backslash (RFC 6690, RFC 2616 §2.2)
+  auto put_quoted = [&](const char *s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+      if (s[i] == '"' || s[i] == '\\')
+        put("\\", 1);
+      put(s + i, 1);
+    }
+  };
   if (add_comma)
     put(",", 1);
   put("</", 2);
@@ -856,7 +901,7 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
     put(";title=\"", sizeof(";title=\"") - 1);
     char name_buf[ENTITY_NAME_BUF_SIZE];
     const StringRef name = res.entity->get_name_to(name_buf);
-    put(name.c_str(), name.size());
+    put_quoted(name.c_str(), name.size());
     put("\";oid=", sizeof("\";oid=") - 1);
     char hash_buf[11];
     size_t hash_len = (size_t) snprintf(hash_buf, sizeof(hash_buf), "%" PRIu32, res.entity->get_object_id_hash());
@@ -873,7 +918,7 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
       const auto uom_ref = res.entity->get_unit_of_measurement_ref();
       if (!uom_ref.empty()) {
         put(";uom=\"", sizeof(";uom=\"") - 1);
-        put(uom_ref.c_str(), uom_ref.size());
+        put_quoted(uom_ref.c_str(), uom_ref.size());
         put("\"", 1);
       }
       char ad_buf[8];
@@ -888,7 +933,7 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
       size_t dc_len = strlen(dc);
       if (dc_len > 0) {
         put(";dc=\"", sizeof(";dc=\"") - 1);
-        put(dc, dc_len);
+        put_quoted(dc, dc_len);
         put("\"", 1);
       }
     }

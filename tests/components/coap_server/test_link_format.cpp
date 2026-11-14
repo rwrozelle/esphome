@@ -56,6 +56,15 @@ TEST(LinkFormatEntry, SensorHasRtObsTitleOidUomDcAd) {
   EXPECT_TRUE(contains(e, ";dc=\"temperature\"")) << e;
 }
 
+TEST(LinkFormatEntry, QuoteAndBackslashInTitleAreEscaped) {
+  TestSensor s;
+  s.configure("12\" pipe \\ temp");
+
+  auto e = LinkFormatServer::entry("fp/1/g/1", &s, ENTITYTYPE_SENSOR);
+
+  EXPECT_TRUE(contains(e, R"(;title="12\" pipe \\ temp";oid=)")) << e;
+}
+
 TEST(LinkFormatEntry, SensorWithoutUomOrDcOmitsThem) {
   TestSensor s;
   s.configure("raw", 1u);

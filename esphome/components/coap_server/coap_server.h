@@ -235,7 +235,7 @@ class CoapServer : public Component {
   // Encodes {2: millis/1000} (or {2: -1} if boot_signal) as CBOR into buf (caller provides >= 16 bytes).
   static size_t build_ping_payload(uint8_t *buf, bool boot_signal);
 
-  // Counts the total number of resources needed: 2 fixed (well-known/core + info) plus one per
+  // Counts the entries resources_ needs: one for /info (.well-known/core and /ping are kept apart) plus one per
   // non-internal entity (two for Switch and Valve), plus one for the log resource if USE_LOGGER.
   static size_t count_resources();
 
@@ -357,6 +357,10 @@ class CoapServer : public Component {
 
   // Builds the OSCORE inner plaintext: [code][0xC1=CF-opt][60=cbor][0xFF][payload].
   // Returns total byte count (4 + payload_len). Both transports use this before oscore_protect_response_.
+  // Finds the payload of a decrypted inner message [code][options][0xFF][payload] by walking the options
+  // (RFC 7252 §3.1). Sets *offset to the payload start, or to len when there is none. False if malformed.
+  static bool oscore_inner_payload_offset(const uint8_t *plain, size_t len, size_t *offset);
+
   // Returns 0 when it does not fit in out_size.
   static size_t oscore_build_inner_cbor(uint8_t code, const uint8_t *payload, size_t payload_len, uint8_t *out,
                                         size_t out_size);
