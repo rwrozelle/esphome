@@ -102,6 +102,20 @@ def _hex_bytes_nonempty(value: Any) -> str:
     return value
 
 
+# RFC 8613 §3.3: an ID may be at most the AES-CCM-16-64-128 nonce length (13) minus 6 bytes
+OSCORE_MAX_ID_BYTES = 7
+
+
+def _hex_bytes_oscore_id(value: Any) -> str:
+    value = _hex_bytes_nonempty(value)
+    if len(value) > 2 * OSCORE_MAX_ID_BYTES:
+        raise cv.Invalid(
+            f"Must be at most {OSCORE_MAX_ID_BYTES} bytes "
+            f"({2 * OSCORE_MAX_ID_BYTES} hex characters), the limit in RFC 8613 section 3.3"
+        )
+    return value
+
+
 def _hex_bytes_master_secret(value: Any) -> str:
     value = _hex_bytes_nonempty(value)
     if len(value) < 32:
@@ -129,8 +143,8 @@ OSCORE_SCHEMA = cv.All(
         {
             cv.Required(CONF_MASTER_SECRET): _hex_bytes_master_secret,
             cv.Optional(CONF_MASTER_SALT, default=""): _hex_bytes,
-            cv.Required(CONF_SENDER_ID): _hex_bytes_nonempty,
-            cv.Required(CONF_RECIPIENT_ID): _hex_bytes_nonempty,
+            cv.Required(CONF_SENDER_ID): _hex_bytes_oscore_id,
+            cv.Required(CONF_RECIPIENT_ID): _hex_bytes_oscore_id,
             cv.Optional(CONF_ID_CONTEXT, default=""): _hex_bytes,
         }
     ),

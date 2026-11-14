@@ -467,6 +467,33 @@ TEST_F(OscoreTest, UnprotectRejectsReservedPivLength) {
 // Persisted sender sequence number
 // ---------------------------------------------------------------------------
 
+// The KID context length is checked against the option before it is skipped
+TEST_F(OscoreTest, UnprotectRejectsKidContextPastOptionEnd) {
+  // h + k flags, PIV length 1; PIV, then a KID context length of 252 in a 7-byte option
+  uint8_t opt[32] = {0x19, 0x01, 252, 0, 0, 0, 0};
+  uint8_t ciphertext[16] = {};
+  uint8_t plain[64];
+  size_t plain_len = 0;
+  CoapServer::OscoreRequestInfo req{};
+
+  EXPECT_FALSE(this->srv_.unprotect(opt, 7, ciphertext, sizeof(ciphertext), plain, sizeof(plain), &plain_len, &req));
+  EXPECT_EQ(req.kid_len, 0u);
+}
+
+TEST_F(OscoreTest, UnprotectReadsKidAfterKidContext) {
+  // h + k flags, PIV length 1; PIV 0x07, a 2-byte KID context, then a 1-byte KID
+  const uint8_t opt[] = {0x19, 0x07, 0x02, 0xAA, 0xBB, 0x42};
+  uint8_t ciphertext[16] = {};
+  uint8_t plain[64];
+  size_t plain_len = 0;
+  CoapServer::OscoreRequestInfo req{};
+
+  this->srv_.unprotect(opt, sizeof(opt), ciphertext, sizeof(ciphertext), plain, sizeof(plain), &plain_len, &req);
+
+  ASSERT_EQ(req.kid_len, 1u);
+  EXPECT_EQ(req.kid[0], 0x42u);
+}
+
 TEST_F(OscoreTest, SaveStoresThresholdAheadOfSequence) {
   this->srv_.set_sender_seq(100);
   this->srv_.save_seq();

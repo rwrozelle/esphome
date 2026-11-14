@@ -570,7 +570,12 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
       ESP_LOGW(TAG, "OSCORE: KID context overflow pos=%u opt_len=%u", pos, opt_len);
       return false;
     }
-    uint8_t ctx_len = opt_val[pos++];
+    const uint8_t ctx_len = opt_val[pos++];
+    // Checked against what is left, so pos stays within the option and the KID length below cannot wrap
+    if (ctx_len > opt_len - pos) {
+      ESP_LOGW(TAG, "OSCORE: KID context length %u past the option end", ctx_len);
+      return false;
+    }
     pos += ctx_len;
   }
   req_info->kid_len = 0;
