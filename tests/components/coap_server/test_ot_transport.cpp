@@ -67,7 +67,23 @@ class TestableCoapServerOT : public CoapServerOT {
     auto *obs = new ehCoapObserver{};  // NOLINT(cppcoreguidelines-owning-memory) freed by shrink_observers()
     obs->next = this->free_observers_;
     this->free_observers_ = obs;
+    this->observer_nodes_++;
   }
+  // As add_coap_resource_() does for each observable resource
+  void add_observable() { this->add_observable_resource_(); }
+  ehCoapObserver *observe(ehCoapResource *resource, uint8_t token) {
+    otMessageInfo info{};
+    otCoapToken t{};
+    t.m8[0] = token;
+    t.mLength = 1;
+    return this->new_observer_(resource, info, t, OT_COAP_TYPE_NON_CONFIRMABLE);
+  }
+  void unobserve(ehCoapObserver *obs) {
+    LockGuard lock(this->lock_);
+    this->free_observer_(obs);
+  }
+  uint8_t observer_cap() const { return this->observer_cap_; }
+  uint8_t observer_nodes() const { return this->observer_nodes_; }
   bool has_free_observers() const { return this->free_observers_ != nullptr; }
   void set_observer_counts(uint8_t active, uint8_t high_water_mark) {
     this->active_count_ = active;
@@ -269,6 +285,69 @@ TEST(CoapServerOTShrink, HighWaterMarkResetToActiveCount) {
   srv.shrink_observers();
 
   EXPECT_EQ(srv.high_water_mark(), 3u);
+}
+
+TEST(CoapServerOTShrink, AllowsNewNodesAgain) {
+  TestableCoapServerOT srv;
+  srv.add_observable();
+  for (uint8_t i = 0; i < srv.observer_cap(); i++)
+    srv.add_free_observer();
+
+  srv.shrink_observers();
+
+  EXPECT_EQ(srv.observer_nodes(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Observer limit: one node per observable resource per client
+// ---------------------------------------------------------------------------
+
+TEST(CoapServerOTObserverLimit, CapFollowsObservableResources) {
+  TestableCoapServerOT srv;
+  EXPECT_EQ(srv.observer_cap(), 0u);
+  srv.add_observable();
+  srv.add_observable();
+  EXPECT_EQ(srv.observer_cap(), 2 * USE_COAP_SERVER_MAX_CLIENTS);
+}
+
+TEST(CoapServerOTObserverLimit, CapClampedTo255) {
+  TestableCoapServerOT srv;
+  for (int i = 0; i < 300; i++)
+    srv.add_observable();
+  EXPECT_EQ(srv.observer_cap(), 255u);
+}
+
+TEST(CoapServerOTObserverLimit, RefusedAtCap) {
+  TestableCoapServerOT srv;
+  TestSensor s;
+  s.configure("s");
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_SENSOR, &s, true);
+  srv.add_observable();
+
+  for (uint8_t i = 0; i < USE_COAP_SERVER_MAX_CLIENTS; i++)
+    ASSERT_NE(srv.observe(res, i), nullptr);
+
+  EXPECT_EQ(srv.observe(res, 0xFF), nullptr);
+  EXPECT_EQ(srv.observer_nodes(), USE_COAP_SERVER_MAX_CLIENTS);
+}
+
+TEST(CoapServerOTObserverLimit, FreedNodeIsReusedAtCap) {
+  TestableCoapServerOT srv;
+  TestSensor s;
+  s.configure("s");
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_SENSOR, &s, true);
+  srv.add_observable();
+  ehCoapObserver *first = nullptr;
+  for (uint8_t i = 0; i < USE_COAP_SERVER_MAX_CLIENTS; i++) {
+    ehCoapObserver *obs = srv.observe(res, i);
+    ASSERT_NE(obs, nullptr);
+    if (first == nullptr)
+      first = obs;
+  }
+  srv.unobserve(first);
+
+  EXPECT_EQ(srv.observe(res, 0xFF), first);
+  EXPECT_EQ(srv.observer_nodes(), USE_COAP_SERVER_MAX_CLIENTS);
 }
 
 // ---------------------------------------------------------------------------

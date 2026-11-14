@@ -6,7 +6,9 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/preferences.h"
 #include "esphome/core/util.h"
+#include <algorithm>
 #include <array>
+#include <cstdint>
 #include <memory>
 
 #ifdef USE_COAP_OSCORE
@@ -266,6 +268,14 @@ class CoapServer : public Component {
   uint8_t client_ping_retry_{1};
   bool subscription_confirm_{false};
   uint8_t observe_retry_{0};
+
+  // Observer nodes are allocated on demand and reused, up to one per observable resource per client, at most 255
+  void add_observable_resource_() {
+    this->observer_cap_ =
+        static_cast<uint8_t>(std::min<unsigned>(this->observer_cap_ + USE_COAP_SERVER_MAX_CLIENTS, UINT8_MAX));
+  }
+  uint8_t observer_cap_{0};
+  uint8_t observer_nodes_{0};  // allocated nodes, active or free
 
 #ifdef USE_LOGGER
   static void log_callback(void *self, uint8_t level, const char *tag, const char *message, size_t message_len);

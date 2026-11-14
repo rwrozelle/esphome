@@ -204,6 +204,8 @@ class TestableCoapServerNet : public CoapServerNet {
   }
 
   NetCoapObserver *first_active_observer() { return this->active_observers_; }
+  uint8_t observer_cap() const { return this->observer_cap_; }
+  uint8_t observer_nodes() const { return this->observer_nodes_; }
   size_t active_observer_count() const {
     size_t count = 0;
     for (auto *obs = this->active_observers_; obs != nullptr; obs = obs->next)

@@ -191,6 +191,7 @@ bool CoapServerNet::teardown() {
     obs = next;
   }
   this->free_observers_ = nullptr;
+  this->observer_nodes_ = 0;
   if (this->sock_) {
     this->sock_->close();
     this->sock_.reset();
@@ -592,7 +593,7 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
           observer->oscore_req_kid_len = oscore_req_info.kid_len;
         }
 #endif
-        if (find_client_(peer) == nullptr)
+        if (observer != nullptr && find_client_(peer) == nullptr)
           new_client_(peer);
       } else if (pkt.observe == 1) {
         NetCoapObserver *obs = get_observer_(pkt.token, pkt.token_len, peer);
@@ -846,6 +847,8 @@ void CoapServerNet::add_net_resource_(EntityType type, EntityBase *entity, bool 
   r.entity = entity;
   r.type = type;
   r.observable = observable;
+  if (observable)
+    this->add_observable_resource_();
 
   ESP_LOGD(TAG, "Add CoAP Net Resource: /%s", r.path);
 
@@ -1029,7 +1032,12 @@ NetCoapObserver *CoapServerNet::new_observer_(NetCoapResource *resource, const s
     this->free_observers_ = obs->next;
     *obs = NetCoapObserver{};
   } else {
+    if (this->observer_nodes_ >= this->observer_cap_) {
+      ESP_LOGW(TAG, "CoAP Net: observer limit (%u) reached", this->observer_cap_);
+      return nullptr;
+    }
     obs = new NetCoapObserver();
+    this->observer_nodes_++;
   }
   obs->resource = resource;
   obs->peer_addr = peer;
@@ -1122,6 +1130,7 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_s
   touch_client_(peer);
   if (pkt.code != 0x01)
     return;  // GET only
+  bool registered = false;
   if (pkt.observe_present && pkt.observe == 0) {
     bool is_con = (pkt.type == 0);
     if (this->get_subscription_confirm() != is_con) {
@@ -1132,7 +1141,7 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_s
     NetCoapObserver *stale = get_observer_(pkt.token, pkt.token_len, peer);
     if (stale != nullptr)
       free_observer_(stale);
-    new_observer_(this->logs_resource_, peer, pkt.token, pkt.token_len, is_con);
+    registered = new_observer_(this->logs_resource_, peer, pkt.token, pkt.token_len, is_con) != nullptr;
   } else if (pkt.observe_present && pkt.observe == 1) {
     NetCoapObserver *obs = get_observer_(pkt.token, pkt.token_len, peer);
     if (obs != nullptr)
@@ -1140,7 +1149,7 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_s
   }
   static const uint8_t EMPTY_CBOR_ARRAY[] = {0x80};
   this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
-  if (pkt.observe_present && pkt.observe == 0)
+  if (registered)
     this->builder_.option_uint(6, 0);
   uint8_t cf = 60;
   this->builder_.option(12, &cf, 1);

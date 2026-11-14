@@ -73,6 +73,7 @@ class LogServer : public TestableCoapServerNet {
   }
 
   void subscribe() { this->inject(make_coap_get(this->logs_resource_->path, 1, 0), make_peer()); }
+  const char *logs_path() const { return this->logs_resource_->path; }
   void unsubscribe() { this->inject(make_coap_get(this->logs_resource_->path, 2, 1), make_peer()); }
   void log(uint8_t level, const char *tag, const char *message) { this->on_log(level, tag, message, strlen(message)); }
 
@@ -91,6 +92,19 @@ TEST(LogCbor, SubscribeAnswersWithEmptyArray) {
   EXPECT_EQ(srv.last_sent[1], 0x45u);
   EXPECT_EQ(payload_of(srv.last_sent), std::string(1, '\x80'));
   EXPECT_EQ(srv.active_observer_count(), 1u);
+}
+
+TEST(LogCbor, SubscribeAtCapAnsweredWithoutObserve) {
+  LogServer srv;
+  for (uint16_t port = 1; port <= USE_COAP_SERVER_MAX_CLIENTS; port++)
+    srv.inject(make_coap_get(srv.logs_path(), port, 0), make_peer(port));
+
+  srv.inject(make_coap_get(srv.logs_path(), 100, 0), make_peer(100));
+
+  ASSERT_GT(srv.last_sent.size(), 5u);
+  EXPECT_EQ(srv.last_sent[1], 0x45u);
+  EXPECT_NE(srv.last_sent[5] >> 4, 6);  // first option is not Observe
+  EXPECT_EQ(srv.active_observer_count(), USE_COAP_SERVER_MAX_CLIENTS);
 }
 
 TEST(LogCbor, NoObserverSkipsEntry) {

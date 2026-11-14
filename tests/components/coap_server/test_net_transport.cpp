@@ -549,5 +549,84 @@ TEST(CoapServerNetIPv4, AckFromIPv4WrongPeerIgnored) {
   EXPECT_FALSE(obs->con_pending);
 }
 
+// ---------------------------------------------------------------------------
+// Observer limit: one node per observable resource per client
+// ---------------------------------------------------------------------------
+
+// The first option after the 1-byte token is Observe (delta 6) only when the observer was registered
+bool response_has_observe(const std::vector<uint8_t> &pkt) { return pkt.size() > 5 && (pkt[5] >> 4) == 6; }
+
+TEST(CoapServerNetObserverLimit, CapCountsOnlyObservableResources) {
+  TestableCoapServerNet srv;
+  srv.init_resources(4);
+  TestSensor s;
+  s.configure("s");
+  TestSwitch sw;
+  sw.configure("sw");
+  uint16_t idx = 1;
+  srv.add_resource(ENTITYTYPE_SENSOR, &s, true, idx);
+  srv.add_resource(ENTITYTYPE_SWITCH, &sw, true, idx);  // its toggle resource is not observable
+
+  EXPECT_EQ(srv.observer_cap(), 2 * USE_COAP_SERVER_MAX_CLIENTS);
+}
+
+TEST(CoapServerNetObserverLimit, RefusedAtCapAnsweredWithoutObserve) {
+  TestableCoapServerNet srv;
+  srv.init_resources(2);
+  TestSensor s;
+  s.configure("s");
+  s.state = 1.0f;
+  uint16_t idx = 1;
+  srv.add_resource(ENTITYTYPE_SENSOR, &s, true, idx);
+
+  for (uint16_t port = 1; port <= USE_COAP_SERVER_MAX_CLIENTS; port++) {
+    srv.inject(make_coap_get("fp/1/g/1", port, 0), make_peer(port));
+    ASSERT_TRUE(response_has_observe(srv.last_sent));
+  }
+  srv.inject(make_coap_get("fp/1/g/1", 100, 0), make_peer(100));
+
+  EXPECT_EQ(srv.last_sent[1], 0x45u);  // still answered with the state
+  EXPECT_FALSE(response_has_observe(srv.last_sent));
+  EXPECT_EQ(srv.active_observer_count(), USE_COAP_SERVER_MAX_CLIENTS);
+  EXPECT_EQ(srv.observer_nodes(), USE_COAP_SERVER_MAX_CLIENTS);
+}
+
+TEST(CoapServerNetObserverLimit, FreedNodeIsReusedAtCap) {
+  TestableCoapServerNet srv;
+  srv.init_resources(2);
+  TestSensor s;
+  s.configure("s");
+  s.state = 1.0f;
+  uint16_t idx = 1;
+  srv.add_resource(ENTITYTYPE_SENSOR, &s, true, idx);
+  for (uint16_t port = 1; port <= USE_COAP_SERVER_MAX_CLIENTS; port++)
+    srv.inject(make_coap_get("fp/1/g/1", port, 0), make_peer(port));
+
+  srv.inject(make_coap_get("fp/1/g/1", 50, 1), make_peer(1));  // deregister
+  srv.inject(make_coap_get("fp/1/g/1", 51, 0), make_peer(100));
+
+  EXPECT_TRUE(response_has_observe(srv.last_sent));
+  EXPECT_EQ(srv.active_observer_count(), USE_COAP_SERVER_MAX_CLIENTS);
+  EXPECT_EQ(srv.observer_nodes(), USE_COAP_SERVER_MAX_CLIENTS);
+}
+
+TEST(CoapServerNetObserverLimit, RefusedObserverDoesNotTakeAClientSlot) {
+  TestableCoapServerNet srv;
+  srv.init_resources(2);
+  TestSensor s;
+  s.configure("s");
+  s.state = 1.0f;
+  uint16_t idx = 1;
+  srv.add_resource(ENTITYTYPE_SENSOR, &s, true, idx);
+  for (uint16_t port = 1; port <= USE_COAP_SERVER_MAX_CLIENTS; port++)
+    srv.inject(make_coap_get("fp/1/g/1", port, 0), make_peer(port));
+  const uint8_t clients = srv.get_active_client_count();
+
+  sockaddr_storage other = make_peer_ipv4("127.0.0.2", 100);
+  srv.inject(make_coap_get("fp/1/g/1", 100, 0), other);
+
+  EXPECT_EQ(srv.get_active_client_count(), clients);
+}
+
 }  // namespace
 }  // namespace esphome::coap_server::testing

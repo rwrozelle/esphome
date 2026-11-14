@@ -183,6 +183,7 @@ bool CoapServerOT::teardown() {
       cur = next;
     }
     this->free_observers_ = nullptr;
+    this->observer_nodes_ = 0;
   }
   openthread::InstanceLock lock = openthread::InstanceLock::acquire();
   otInstance *instance = lock.get_instance();
@@ -474,13 +475,15 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
             obs->oscore_req_kid_len = oscore_req_info.kid_len;
           }
 #endif
-          bool client_known;
-          {
-            LockGuard guard(this->lock_);
-            client_known = (this->find_client_(message_info->mPeerAddr) != nullptr);
+          if (obs != nullptr) {
+            bool client_known;
+            {
+              LockGuard guard(this->lock_);
+              client_known = (this->find_client_(message_info->mPeerAddr) != nullptr);
+            }
+            if (!client_known)
+              this->new_client_(*message_info);
           }
-          if (!client_known)
-            this->new_client_(*message_info);
         } else if (observe == 1 && observer != nullptr) {
           ESP_LOGD(TAG, "Cancel Observer: /%s", resource->path);
           LockGuard lock(this->lock_);
@@ -768,6 +771,7 @@ void CoapServerOT::shrink_observers() {
   while (cur != nullptr) {
     ehCoapObserver *next = cur->next;
     delete cur;
+    this->observer_nodes_--;
     cur = next;
   }
   this->free_observers_ = nullptr;
@@ -890,6 +894,8 @@ void CoapServerOT::add_coap_resource_(EntityType type, EntityBase *entity, bool 
   }
   resource->server = this;
   resource->observable = observable;
+  if (observable)
+    this->add_observable_resource_();
   resource->entity = entity;
   resource->type = type;
   resource->mUriPath = resource->path;
@@ -980,32 +986,41 @@ ehCoapObserver *CoapServerOT::get_observer_(otMessage *message, const otMessageI
 
 ehCoapObserver *CoapServerOT::new_observer_(ehCoapResource *resource, const otMessageInfo &message_info,
                                             const otCoapToken &token, otCoapType obs_type) {
-  LockGuard lock(this->lock_);
-  ehCoapObserver *obs;
-  if (this->free_observers_ != nullptr) {
-    obs = this->free_observers_;
-    this->free_observers_ = obs->next;
-    *obs = ehCoapObserver{};
-  } else {
-    obs = new ehCoapObserver();
+  ehCoapObserver *obs = nullptr;
+  {
+    LockGuard lock(this->lock_);
+    if (this->free_observers_ != nullptr) {
+      obs = this->free_observers_;
+      this->free_observers_ = obs->next;
+      *obs = ehCoapObserver{};
+    } else if (this->observer_nodes_ < this->observer_cap_) {
+      obs = new ehCoapObserver();
+      this->observer_nodes_++;
+    }
+    if (obs != nullptr) {
+      obs->resource = resource;
+      obs->message_info = message_info;
+      obs->coap_token = token;
+      obs->obs_type = obs_type;
+      obs->notify_count = 0;
+      // Prepend to active list only after full initialisation so on_entity_update never
+      // sees a node with a valid next but a null resource.
+      obs->next = this->active_observers_;
+      this->active_observers_ = obs;
+      this->active_count_++;
+      if (this->active_count_ > this->high_water_mark_) {
+        this->high_water_mark_ = this->active_count_;
+      }
+      if (obs_type == OT_COAP_TYPE_NON_CONFIRMABLE) {
+        ehCoapClient *client = this->find_client_(message_info.mPeerAddr);
+        if (client != nullptr)
+          client->has_non_observer = true;
+      }
+    }
   }
-  obs->resource = resource;
-  obs->message_info = message_info;
-  obs->coap_token = token;
-  obs->obs_type = obs_type;
-  obs->notify_count = 0;
-  // Prepend to active list only after full initialisation so on_entity_update never
-  // sees a node with a valid next but a null resource.
-  obs->next = this->active_observers_;
-  this->active_observers_ = obs;
-  this->active_count_++;
-  if (this->active_count_ > this->high_water_mark_) {
-    this->high_water_mark_ = this->active_count_;
-  }
-  if (obs_type == OT_COAP_TYPE_NON_CONFIRMABLE) {
-    ehCoapClient *client = this->find_client_(message_info.mPeerAddr);
-    if (client != nullptr)
-      client->has_non_observer = true;
+  // Logged outside lock_, which the log callback takes
+  if (obs == nullptr) {
+    ESP_LOGW(TAG, "Observer limit (%u) reached", this->observer_cap_);
   }
   return obs;
 }
@@ -1314,6 +1329,7 @@ void CoapServerOT::handle_logs_request(void *context, otMessage *message, const 
     return;
 
   uint8_t observe = self->observe_(message);
+  bool registered = false;
 
   if (observe == 0) {
     bool is_con = (otCoapMessageGetType(message) == OT_COAP_TYPE_CONFIRMABLE);
@@ -1336,7 +1352,7 @@ void CoapServerOT::handle_logs_request(void *context, otMessage *message, const 
     }
     otCoapToken token;
     SuccessOrExit(error = otCoapMessageReadToken(message, &token));
-    self->new_observer_(resource, *message_info, token, otCoapMessageGetType(message));
+    registered = self->new_observer_(resource, *message_info, token, otCoapMessageGetType(message)) != nullptr;
   } else if (observe == 1) {
     ehCoapObserver *obs = self->get_observer_(message, message_info);
     if (obs != nullptr) {
@@ -1347,7 +1363,7 @@ void CoapServerOT::handle_logs_request(void *context, otMessage *message, const 
 
   static const uint8_t kEmptyArray[] = {0x80};  // CBOR [] — no current state to return
   SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
-  if (observe == 0)
+  if (registered)
     SuccessOrExit(error = otCoapMessageAppendObserveOption(response, 0));
   SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
   SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
