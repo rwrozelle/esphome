@@ -208,7 +208,7 @@ size_t CoapServer::build_link_format(uint8_t *buf, size_t buf_len) {
   }
 #endif
 
-  static const char PING_ENTRY[] = R"(,</ping>;rt="esphome.ping";if="if.a";ct=112)";
+  static constexpr char PING_ENTRY[] = R"(,</ping>;rt="esphome.ping";if="if.a";ct=112)";
   size_t ping_len = sizeof(PING_ENTRY) - 1;
   if (buf != nullptr && total + ping_len <= buf_len)
     memcpy(buf + total, PING_ENTRY, ping_len);
@@ -325,7 +325,7 @@ void CoapServer::apply_entity_post(EntityBase *entity, EntityType type, ActionTy
 // [id (bstr), id_context (bstr / null), alg (int = 10), type (tstr), L (uint)]
 static size_t oscore_build_info(uint8_t *buf, size_t buf_len, const uint8_t *id, size_t id_len,
                                 const uint8_t *id_context, size_t id_context_len, const char *type, uint8_t key_len) {
-  static const uint8_t EMPTY_BUF[1] = {};
+  static constexpr uint8_t EMPTY_BUF[1] = {};
   CborEncoder enc, arr;
   cbor_encoder_init(&enc, buf, buf_len, 0);
   if (cbor_encoder_create_array(&enc, &arr, 5) != CBOR_NO_ERROR)
@@ -473,7 +473,7 @@ size_t CoapServer::oscore_build_aad(const uint8_t *kid, uint8_t kid_len, const u
     return 0;
   if (cbor_encode_byte_string(&arr, piv, piv_len) != CBOR_NO_ERROR)
     return 0;
-  static const uint8_t EMPTY_BUF[1] = {};
+  static constexpr uint8_t EMPTY_BUF[1] = {};
   if (cbor_encode_byte_string(&arr, EMPTY_BUF, 0) != CBOR_NO_ERROR)  // class-I options (empty)
     return 0;
   if (cbor_encoder_close_container(&enc, &arr) != CBOR_NO_ERROR)

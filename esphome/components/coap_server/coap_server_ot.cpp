@@ -1557,7 +1557,7 @@ void CoapServerOT::handle_logs_request(void *context, otMessage *message, const 
     }
   }
 
-  static const uint8_t kEmptyArray[] = {0x80};  // CBOR [] — no current state to return
+  static constexpr uint8_t EMPTY_CBOR_ARRAY[] = {0x80};  // CBOR [] — no current state to return
 #ifdef USE_COAP_OSCORE
   if (oscore_protected) {
     if (observer != nullptr) {
@@ -1568,8 +1568,8 @@ void CoapServerOT::handle_logs_request(void *context, otMessage *message, const 
       memcpy(observer->oscore_req_kid, oscore_req_info.kid, oscore_req_info.kid_len);
       observer->oscore_req_kid_len = oscore_req_info.kid_len;
     }
-    uint8_t inner[sizeof(kEmptyArray) + 4];
-    size_t inner_len = oscore_build_inner_cbor(0x45, kEmptyArray, sizeof(kEmptyArray), inner, sizeof(inner));
+    uint8_t inner[sizeof(EMPTY_CBOR_ARRAY) + 4];
+    size_t inner_len = oscore_build_inner_cbor(0x45, EMPTY_CBOR_ARRAY, sizeof(EMPTY_CBOR_ARRAY), inner, sizeof(inner));
     uint8_t ciphertext[sizeof(inner) + OSCORE_TAG_LEN];
     size_t cipher_len =
         self->oscore_protect_response_(inner, inner_len, oscore_req_info, false, ciphertext, sizeof(ciphertext));
@@ -1596,7 +1596,7 @@ void CoapServerOT::handle_logs_request(void *context, otMessage *message, const 
     SuccessOrExit(error = otCoapMessageAppendObserveOption(response, observer->observe_serial++));
   SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
   SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-  SuccessOrExit(error = otMessageAppend(response, kEmptyArray, sizeof(kEmptyArray)));
+  SuccessOrExit(error = otMessageAppend(response, EMPTY_CBOR_ARRAY, sizeof(EMPTY_CBOR_ARRAY)));
   SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
 
 exit:

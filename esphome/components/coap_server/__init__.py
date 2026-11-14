@@ -270,19 +270,19 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_client_ping_timeout_ratio(config[CONF_CLIENT_PING_TIMEOUT_RATIO]))
     cg.add(var.set_client_ping_retry(config[CONF_CLIENT_PING_RETRY]))
     cg.add_define("USE_COAP_SERVER_MAX_CLIENTS", config[CONF_MAX_CONNECTIONS])
-    if CONF_ON_CLIENT_CONNECTED in config:
+    if (conf := config.get(CONF_ON_CLIENT_CONNECTED)) is not None:
         await automation.build_callback_automation(
             var,
             "add_on_client_connected_callback",
             [(cg.std_string, "client_address")],
-            config[CONF_ON_CLIENT_CONNECTED],
+            conf,
         )
-    if CONF_ON_CLIENT_DISCONNECTED in config:
+    if (conf := config.get(CONF_ON_CLIENT_DISCONNECTED)) is not None:
         await automation.build_callback_automation(
             var,
             "add_on_client_disconnected_callback",
             [(cg.std_string, "client_address")],
-            config[CONF_ON_CLIENT_DISCONNECTED],
+            conf,
         )
     cg.add_define("USE_COAP_SERVER_PORT", config[CONF_PORT])
     cg.add(var.set_subscription_confirm(config[CONF_SUBSCRIPTION_CONFIRM]))

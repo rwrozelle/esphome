@@ -20,7 +20,7 @@ static constexpr uint32_t COAP_ACK_RANDOM_SPREAD_MS = 1000;
 static constexpr uint8_t COAP_MAX_RETRANSMIT = 4;
 // Coarse against the 2 s and longer waits, so loop() does not walk the observers on every pass
 static constexpr uint32_t CON_CHECK_INTERVAL_MS = 250;
-static const size_t ADDR_STR_LEN = 46;  // large enough for IPv4 and IPv6 (INET6_ADDRSTRLEN)
+static constexpr size_t ADDR_STR_LEN = 46;  // large enough for IPv4 and IPv6 (INET6_ADDRSTRLEN)
 
 // Response type: CON(0)→ACK(2), NON(1)→NON(1)
 static inline uint8_t resp_type(uint8_t req_type) { return (req_type == 0) ? 2 : 1; }
@@ -1243,7 +1243,7 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_s
     if (obs != nullptr)
       this->free_observer_(obs);
   }
-  static const uint8_t EMPTY_CBOR_ARRAY[] = {0x80};
+  static constexpr uint8_t EMPTY_CBOR_ARRAY[] = {0x80};
 #ifdef USE_COAP_OSCORE
   if (oscore_protected) {
     if (observer != nullptr) {
