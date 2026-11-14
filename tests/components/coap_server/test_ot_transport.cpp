@@ -27,6 +27,9 @@ class TestableCoapServerOT : public CoapServerOT {
       if (client.active)
         this->cancel_ping_client_(&client);
     }
+#ifdef USE_LOGGER
+    this->cancel_interval(static_cast<uint32_t>(0));  // LOG_FLUSH_ID in coap_server_ot.cpp; the flush captures this
+#endif
     this->teardown();
     if (global_coap_server == this)
       global_coap_server = nullptr;
@@ -121,18 +124,28 @@ class TestableCoapServerOT : public CoapServerOT {
   uint8_t high_water_mark() const { return this->high_water_mark_; }
 
   ehCoapClient *connect_client(const otMessageInfo &info) { return this->new_client_(info); }
+#ifdef USE_LOGGER
+  void schedule_log_flush() { this->schedule_log_flush_(); }
+  void flush_logs() { this->flush_logs_(); }
+  uint32_t log_flush_ms() const { return this->log_flush_ms_; }
+#endif
   void disconnect_client(ehCoapClient *client) { this->free_client_(client); }
 
 #ifdef USE_COAP_OSCORE
   // Sender ID h'01' and an empty Recipient ID, as in the network transport's OSCORE tests
-  bool setup_oscore() {
+  void set_oscore_material() {
     static const uint8_t SECRET[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
     this->set_oscore_master_secret({SECRET, SECRET + sizeof(SECRET)});
     this->set_oscore_master_salt({});
     this->set_oscore_sender_id({0x01});
     this->set_oscore_recipient_id({});
+  }
+  bool setup_oscore() {
+    this->set_oscore_material();
     return this->oscore_derive_keys_();
   }
+  // Key derivation clears the master secret
+  bool keys_derived() const { return this->oscore_master_secret_.empty(); }
   // Encrypts a request as a client with Sender ID h'' would, or decrypts the reply to it
   bool client_crypt(bool encrypt, const uint8_t *piv, uint8_t piv_len, const uint8_t *in, size_t in_len, uint8_t *out,
                     size_t out_size, size_t *out_len) {
@@ -633,6 +646,86 @@ TEST(CoapServerOTCallbacks, ConnectAndDisconnectReportTheSameAddress) {
   EXPECT_FALSE(connected.empty());
   EXPECT_EQ(disconnected, connected);
   EXPECT_EQ(srv.get_active_client_count(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Client ping interval, run through the real scheduler
+// ---------------------------------------------------------------------------
+
+void run_ot_scheduler_for(uint32_t ms) {
+  const uint32_t start = millis();
+  while (millis() - start < ms) {
+    delay(5);
+    App.scheduler.call(millis());
+  }
+}
+
+otMessageInfo client_info() {
+  otMessageInfo info{};
+  info.mPeerAddr.mFields.m8[0] = 0xfd;
+  info.mPeerAddr.mFields.m8[15] = 0x02;
+  return info;
+}
+
+TEST(CoapServerOTPingInterval, QuietClientIsPinged) {
+  TestableCoapServerOT srv;
+  srv.set_client_ping_interval(20);
+  ehCoapClient *c = srv.connect_client(client_info());
+  ASSERT_NE(c, nullptr);
+  c->has_non_observer = true;
+  c->last_response_ms = millis() - 100;
+  const int before = fake_ot::requests_sent();
+
+  run_ot_scheduler_for(60);
+
+  EXPECT_GT(fake_ot::requests_sent(), before);
+  EXPECT_NE(c->last_ping_sent_ms, 0u);
+  EXPECT_TRUE(c->active);
+}
+
+TEST(CoapServerOTPingInterval, ClientThatStopsAnsweringIsFreed) {
+  TestableCoapServerOT srv;
+  srv.set_client_ping_interval(20);
+  ehCoapClient *c = srv.connect_client(client_info());
+  ASSERT_NE(c, nullptr);
+  c->last_ping_sent_ms = 1;
+  c->last_response_ms = millis() - 5000;
+
+  run_ot_scheduler_for(60);
+
+  EXPECT_FALSE(c->active);
+  EXPECT_EQ(srv.get_active_client_count(), 0u);
+}
+
+#ifdef USE_LOGGER
+TEST(CoapServerOTLogFlush, FollowsPollPeriod) {
+  TestableCoapServerOT srv;
+  srv.schedule_log_flush();
+  EXPECT_EQ(srv.log_flush_ms(), 5000u);
+
+  fake_ot::set_poll_period(200);
+  srv.flush_logs();
+  EXPECT_EQ(srv.log_flush_ms(), 1000u);  // never below 1 s
+
+  fake_ot::set_poll_period(8000);
+  srv.flush_logs();
+  EXPECT_EQ(srv.log_flush_ms(), 8000u);
+}
+#endif
+
+TEST(CoapServerOTSetup, CoapStartFailureMarksFailed) {
+  TestableCoapServerOT srv;
+#ifdef USE_COAP_OSCORE
+  srv.set_oscore_material();
+#endif
+  fake_ot::fail_coap_start();
+
+  srv.setup();
+
+  EXPECT_TRUE(srv.is_failed());
+#ifdef USE_COAP_OSCORE
+  EXPECT_TRUE(srv.keys_derived());  // so the failure came from starting CoAP
+#endif
 }
 
 }  // namespace

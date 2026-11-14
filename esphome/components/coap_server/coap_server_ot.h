@@ -83,6 +83,9 @@ class CoapServerOT : public CoapServer {
 
 #ifdef USE_LOGGER
   void flush_logs_();
+  // (Re)starts the log flush interval when the poll period it follows has changed
+  void schedule_log_flush_();
+  uint32_t log_flush_ms_{0};
   void on_log(uint8_t level, const char *tag, const char *message, size_t message_len);
   ehCoapResource *logs_resource_{nullptr};
 #endif  // USE_LOGGER

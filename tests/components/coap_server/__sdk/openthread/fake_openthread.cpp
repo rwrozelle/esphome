@@ -59,6 +59,8 @@ void *g_request_ctx = nullptr;
 int g_requests_sent = 0;
 bool g_fail_next_new_message = false;
 bool g_fail_next_send = false;
+bool g_fail_coap_start = false;
+uint32_t g_poll_period = 5000;
 
 }  // namespace
 
@@ -82,6 +84,8 @@ void reset() {
   g_requests_sent = 0;
   g_fail_next_new_message = false;
   g_fail_next_send = false;
+  g_fail_coap_start = false;
+  g_poll_period = 5000;
 }
 
 std::string last_response() {
@@ -116,12 +120,16 @@ void complete_pending_request(otError error) {
 }
 void fail_next_new_message() { g_fail_next_new_message = true; }
 void fail_next_send() { g_fail_next_send = true; }
+void fail_coap_start() { g_fail_coap_start = true; }
+void set_poll_period(uint32_t ms) { g_poll_period = ms; }
 
 }  // namespace esphome::coap_server::testing::fake_ot
 
 extern "C" {
 
-otError otCoapStart(otInstance * /*instance*/, uint16_t /*port*/) { return OT_ERROR_NONE; }
+otError otCoapStart(otInstance * /*instance*/, uint16_t /*port*/) {
+  return g_fail_coap_start ? OT_ERROR_FAILED : OT_ERROR_NONE;
+}
 otError otCoapStop(otInstance * /*instance*/) { return OT_ERROR_NONE; }
 void otCoapAddResource(otInstance * /*instance*/, otCoapResource * /*resource*/) {}
 void otCoapRemoveResource(otInstance * /*instance*/, otCoapResource * /*resource*/) {}
@@ -348,7 +356,7 @@ const char *otThreadErrorToString(otError error) {
   }
 }
 
-uint32_t otLinkGetPollPeriod(otInstance * /*instance*/) { return 5000; }
+uint32_t otLinkGetPollPeriod(otInstance * /*instance*/) { return g_poll_period; }
 
 bool otIp6IsAddressEqual(const otIp6Address *a, const otIp6Address *b) {
   return memcmp(a->mFields.m8, b->mFields.m8, sizeof(a->mFields.m8)) == 0;

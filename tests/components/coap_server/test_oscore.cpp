@@ -614,6 +614,37 @@ TEST_F(OscoreTest, ProtectedPostWithMalformedInnerIsRejected) {
   EXPECT_FALSE(sw.state);
 }
 
+// ---------------------------------------------------------------------------
+// setup() failures; both return before setup() reaches the logger
+// ---------------------------------------------------------------------------
+
+TEST(OscoreSetup, KeyDerivationFailureMarksFailed) {
+  OscoreServer srv;
+  srv.set_material(std::vector<uint8_t>(60, 0x01), {});  // too long for the HKDF info buffer
+
+  srv.setup();
+
+  EXPECT_TRUE(srv.is_failed());
+}
+
+TEST(OscoreSetup, BindFailureMarksFailed) {
+  // Hold the port with a socket that does not allow reuse, so the server's bind fails
+  sockaddr_storage addr{};
+  socklen_t addr_len =
+      socket::set_sockaddr_any(reinterpret_cast<sockaddr *>(&addr), sizeof(addr), USE_COAP_SERVER_PORT);
+  const int blocker = ::socket(addr.ss_family, SOCK_DGRAM, IPPROTO_UDP);
+  ASSERT_GE(blocker, 0);
+  ASSERT_EQ(::bind(blocker, reinterpret_cast<sockaddr *>(&addr), addr_len), 0) << "port already in use";
+  OscoreServer srv;
+  srv.set_material({0x01}, {});
+
+  srv.setup();
+  ::close(blocker);
+
+  EXPECT_TRUE(srv.key_material_cleared());  // keys were derived, so the failure came later
+  EXPECT_TRUE(srv.is_failed());
+}
+
 // NON POST as make_oscore_post(), with an Observe option (6) set to observe before the OSCORE option
 std::vector<uint8_t> make_oscore_observe(const char *path, uint8_t observe, const uint8_t *opt, uint8_t opt_len,
                                          const uint8_t *ciphertext, size_t cipher_len) {

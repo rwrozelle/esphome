@@ -1,3 +1,5 @@
+from typing import Any
+
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import socket as esphome_socket
@@ -80,7 +82,7 @@ FILTER_SOURCE_FILES = filter_source_files_from_defines(
 )
 
 
-def _hex_bytes(value):
+def _hex_bytes(value: Any) -> str:
     """Validate a hex string and normalise to lowercase with no separators."""
     value = cv.string(value)
     clean = value.replace(" ", "").replace(":", "")
@@ -93,14 +95,14 @@ def _hex_bytes(value):
     return clean.lower()
 
 
-def _hex_bytes_nonempty(value):
+def _hex_bytes_nonempty(value: Any) -> str:
     value = _hex_bytes(value)
     if len(value) == 0:
         raise cv.Invalid("Value must not be empty")
     return value
 
 
-def _hex_bytes_master_secret(value):
+def _hex_bytes_master_secret(value: Any) -> str:
     value = _hex_bytes_nonempty(value)
     if len(value) < 32:
         raise cv.Invalid("master_secret must be at least 16 bytes (32 hex characters)")
@@ -113,7 +115,7 @@ def _hex_to_bytes_list(hex_str: str) -> list[int]:
     return [int(hex_str[i : i + 2], 16) for i in range(0, len(hex_str), 2)]
 
 
-def _validate_oscore(config):
+def _validate_oscore(config: ConfigType) -> ConfigType:
     if config[CONF_SENDER_ID] == config[CONF_RECIPIENT_ID]:
         raise cv.Invalid(
             f"'{CONF_SENDER_ID}' and '{CONF_RECIPIENT_ID}' must be different"
@@ -145,7 +147,7 @@ _PING_KEYS = (
 )
 
 
-def _validate_subscription_mode(config):
+def _validate_subscription_mode(config: ConfigType) -> ConfigType:
     confirm = config.get(CONF_SUBSCRIPTION_CONFIRM, False)
     if confirm:
         for key in _PING_KEYS:
@@ -155,34 +157,22 @@ def _validate_subscription_mode(config):
                     "ping is not used in CON observe mode",
                     path=[key],
                 )
-        config.setdefault(
-            CONF_SERVER_PING_INTERVAL, cv.positive_time_period_milliseconds("60s")
+    elif CONF_OBSERVE_RETRY in config:
+        raise cv.Invalid(
+            f"'{CONF_OBSERVE_RETRY}' can only be set when '{CONF_SUBSCRIPTION_CONFIRM}' is true",
+            path=[CONF_OBSERVE_RETRY],
         )
-        config.setdefault(CONF_SERVER_PING_TIMEOUT_RATIO, 2.5)
-        config.setdefault(CONF_SERVER_PING_RETRY, 1)
-        config.setdefault(
-            CONF_CLIENT_PING_INTERVAL, cv.positive_time_period_milliseconds("60s")
-        )
-        config.setdefault(CONF_CLIENT_PING_TIMEOUT_RATIO, 2.5)
-        config.setdefault(CONF_CLIENT_PING_RETRY, 1)
-        config.setdefault(CONF_OBSERVE_RETRY, 1)
-    else:
-        if CONF_OBSERVE_RETRY in config:
-            raise cv.Invalid(
-                f"'{CONF_OBSERVE_RETRY}' can only be set when '{CONF_SUBSCRIPTION_CONFIRM}' is true",
-                path=[CONF_OBSERVE_RETRY],
-            )
-        config.setdefault(
-            CONF_SERVER_PING_INTERVAL, cv.positive_time_period_milliseconds("60s")
-        )
-        config.setdefault(CONF_SERVER_PING_TIMEOUT_RATIO, 2.5)
-        config.setdefault(CONF_SERVER_PING_RETRY, 1)
-        config.setdefault(
-            CONF_CLIENT_PING_INTERVAL, cv.positive_time_period_milliseconds("60s")
-        )
-        config.setdefault(CONF_CLIENT_PING_TIMEOUT_RATIO, 2.5)
-        config.setdefault(CONF_CLIENT_PING_RETRY, 1)
-        config.setdefault(CONF_OBSERVE_RETRY, 0)
+    config.setdefault(
+        CONF_SERVER_PING_INTERVAL, cv.positive_time_period_milliseconds("60s")
+    )
+    config.setdefault(CONF_SERVER_PING_TIMEOUT_RATIO, 2.5)
+    config.setdefault(CONF_SERVER_PING_RETRY, 1)
+    config.setdefault(
+        CONF_CLIENT_PING_INTERVAL, cv.positive_time_period_milliseconds("60s")
+    )
+    config.setdefault(CONF_CLIENT_PING_TIMEOUT_RATIO, 2.5)
+    config.setdefault(CONF_CLIENT_PING_RETRY, 1)
+    config.setdefault(CONF_OBSERVE_RETRY, 1 if confirm else 0)
     return config
 
 
@@ -241,7 +231,7 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
-async def to_code(config):
+async def to_code(config: ConfigType) -> None:
     use_ot = _uses_openthread()
 
     id_ = config[CONF_ID].copy()
@@ -311,7 +301,7 @@ async def to_code(config):
         cg.add(var.set_oscore_id_context(_hex_to_bytes_list(oscore[CONF_ID_CONTEXT])))
 
 
-def _final_validate(config):
+def _final_validate(config: ConfigType) -> None:
     full_config = fv.full_config.get()
     ot_config = full_config.get("openthread")
     if ot_config is None:

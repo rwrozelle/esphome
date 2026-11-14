@@ -37,5 +37,9 @@ void complete_pending_request(otError error);
 // Makes the next otCoapNewMessage or otCoapSendRequest fail
 void fail_next_new_message();
 void fail_next_send();
+// Makes otCoapStart fail until reset()
+void fail_coap_start();
+// What otLinkGetPollPeriod returns; 5000 after reset()
+void set_poll_period(uint32_t ms);
 
 }  // namespace esphome::coap_server::testing::fake_ot

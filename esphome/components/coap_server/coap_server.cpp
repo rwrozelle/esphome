@@ -17,7 +17,7 @@ CoapServer::CoapServer() { global_coap_server = this; }
 void CoapServer::setup() {
 #ifdef USE_COAP_OSCORE
   if (!this->oscore_derive_keys_()) {
-    this->mark_failed();
+    this->mark_failed(LOG_STR("OSCORE key derivation failed"));
     return;
   }
   this->oscore_restore_seq_no_();
@@ -361,7 +361,6 @@ bool CoapServer::oscore_derive_keys_() {
   if (info_len == 0 || !oscore_hkdf_sha256(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
                                            this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
                                            info_len, key_buf, OSCORE_KEY_LEN)) {
-    ESP_LOGE(TAG, "OSCORE sender key derivation failed");
     return false;
   }
   memcpy(this->oscore_sender_key_, key_buf, OSCORE_KEY_LEN);
@@ -374,7 +373,6 @@ bool CoapServer::oscore_derive_keys_() {
   if (info_len == 0 || !oscore_hkdf_sha256(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
                                            this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
                                            info_len, key_buf, OSCORE_KEY_LEN)) {
-    ESP_LOGE(TAG, "OSCORE recipient key derivation failed");
     return false;
   }
   memcpy(this->oscore_recipient_key_, key_buf, OSCORE_KEY_LEN);
@@ -386,7 +384,6 @@ bool CoapServer::oscore_derive_keys_() {
   if (info_len == 0 || !oscore_hkdf_sha256(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
                                            this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
                                            info_len, this->oscore_common_iv_, OSCORE_IV_LEN)) {
-    ESP_LOGE(TAG, "OSCORE common IV derivation failed");
     return false;
   }
 
@@ -495,8 +492,8 @@ size_t CoapServer::oscore_protect_response_(const uint8_t *inner, size_t inner_l
 
   if (is_notification) {
     if (this->oscore_sender_seq_no_ == UINT32_MAX) {
-      ESP_LOGE(TAG, "OSCORE: sender sequence number exhausted, halting");
-      this->mark_failed();
+      // Permanent: no notification can be protected again under these keys
+      this->status_set_error(LOG_STR("OSCORE sender sequence number exhausted"));
       return 0;
     }
     piv_len = oscore_encode_piv(this->oscore_sender_seq_no_, piv);

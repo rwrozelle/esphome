@@ -4,6 +4,8 @@
 #include <algorithm>
 
 #include "common.h"
+#include "esphome/core/application.h"
+#include "esphome/core/hal.h"
 
 namespace esphome::coap_server::testing {
 namespace {
@@ -616,6 +618,8 @@ TEST(CoapServerNetConRetransmit, NotificationNotSentWhenEncryptionFails) {
 
   EXPECT_TRUE(srv.last_sent.empty());
   EXPECT_FALSE(obs->con_pending);
+  EXPECT_TRUE(srv.status_has_error());
+  EXPECT_FALSE(srv.is_failed());  // after setup the component reports an error instead of failing
 }
 #endif
 
@@ -813,6 +817,53 @@ TEST(CoapServerNetObserverLimit, RefusedObserverDoesNotTakeAClientSlot) {
   srv.inject(make_coap_get("fp/1/g/1", 100, 0), other);
 
   EXPECT_EQ(srv.get_active_client_count(), clients);
+}
+
+// ---------------------------------------------------------------------------
+// Client ping interval, run through the real scheduler
+// ---------------------------------------------------------------------------
+
+// Lets the scheduler run whatever falls due during ms milliseconds
+void run_scheduler_for(uint32_t ms) {
+  const uint32_t start = millis();
+  while (millis() - start < ms) {
+    delay(5);
+    App.scheduler.call(millis());
+  }
+}
+
+TEST(CoapServerNetPingInterval, QuietClientIsPingedRepeatedly) {
+  TestableCoapServerNet srv;
+  srv.set_client_ping_interval(20);
+  NetCoapClient *c = srv.connect_client(make_peer());
+  ASSERT_NE(c, nullptr);
+  c->has_non_observer = true;
+  c->last_response_ms = millis() - 100;  // quiet for longer than the interval, within the 1 s timeout
+  srv.last_sent.clear();
+
+  run_scheduler_for(60);
+  ASSERT_FALSE(srv.last_sent.empty());
+  EXPECT_EQ(srv.last_sent[1], 0x01u);  // GET
+  EXPECT_NE(std::string(srv.last_sent.begin(), srv.last_sent.end()).find("ping"), std::string::npos);
+  const uint16_t first_id = message_id(srv.last_sent);
+
+  run_scheduler_for(60);
+  EXPECT_NE(message_id(srv.last_sent), first_id);  // the interval keeps running
+  EXPECT_TRUE(c->active);
+}
+
+TEST(CoapServerNetPingInterval, ClientThatStopsAnsweringIsFreed) {
+  TestableCoapServerNet srv;
+  srv.set_client_ping_interval(20);
+  NetCoapClient *c = srv.connect_client(make_peer());
+  ASSERT_NE(c, nullptr);
+  c->last_ping_sent_ms = 1;
+  c->last_response_ms = millis() - 5000;  // past the 1 s minimum timeout
+
+  run_scheduler_for(60);
+
+  EXPECT_FALSE(c->active);
+  EXPECT_EQ(srv.get_active_client_count(), 0u);
 }
 
 }  // namespace

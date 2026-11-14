@@ -154,6 +154,9 @@ class TestableCoapServerNet : public CoapServerNet {
       if (client.active)
         this->cancel_ping_client_(&client);
     }
+#ifdef USE_LOGGER
+    this->cancel_interval(static_cast<uint32_t>(0));  // LOG_FLUSH_ID in coap_server_net.cpp; the flush captures this
+#endif
     this->teardown();
     if (global_coap_server == this)
       global_coap_server = nullptr;

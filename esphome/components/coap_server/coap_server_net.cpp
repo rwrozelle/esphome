@@ -10,7 +10,9 @@
 namespace esphome::coap_server {
 
 ESPHOME_LOG_TAG(TAG, "coap_server");
-static constexpr uint32_t PING_TIMEOUT_ID_BASE = 0;
+// Scheduler ids: the log flush, then one client ping interval per client slot
+static constexpr uint32_t LOG_FLUSH_ID = 0;
+static constexpr uint32_t PING_ID_BASE = 1;
 
 // RFC 7252 §4.8 defaults, as OpenThread uses: the first wait is ACK_TIMEOUT times a random factor of 1 to 1.5
 static constexpr uint32_t COAP_ACK_TIMEOUT_MS = 2000;
@@ -76,8 +78,7 @@ void CoapServerNet::setup() {
 
   this->sock_ = socket::socket_ip_loop_monitored(SOCK_DGRAM, IPPROTO_UDP);
   if (!this->sock_) {
-    ESP_LOGE(TAG, "CoAP Net: socket() failed");
-    this->mark_failed();
+    this->mark_failed(LOG_STR("Socket creation failed"));
     return;
   }
   int yes = 1;
@@ -85,9 +86,8 @@ void CoapServerNet::setup() {
   sockaddr_storage bind_addr{};
   socklen_t bind_len = socket::set_sockaddr_any((sockaddr *) &bind_addr, sizeof(bind_addr), USE_COAP_SERVER_PORT);
   if (this->sock_->bind((sockaddr *) &bind_addr, bind_len) < 0) {
-    ESP_LOGE(TAG, "CoAP Net: bind() failed");
     this->sock_.reset();
-    this->mark_failed();
+    this->mark_failed(LOG_STR("Socket bind failed"));
     return;
   }
   this->sock_->setblocking(false);
@@ -107,67 +107,67 @@ void CoapServerNet::setup() {
 #ifdef USE_BINARY_SENSOR
   for (auto *e : App.get_binary_sensors()) {
     if (!e->is_internal()) {
-      add_net_resource_(ENTITYTYPE_BINARY_SENSOR, e, true, senml_index);
+      this->add_net_resource_(ENTITYTYPE_BINARY_SENSOR, e, true, senml_index);
     }
   }
 #endif
 #ifdef USE_BUTTON
   for (auto *e : App.get_buttons()) {
     if (!e->is_internal()) {
-      add_net_resource_(ENTITYTYPE_BUTTON, e, false, senml_index);
+      this->add_net_resource_(ENTITYTYPE_BUTTON, e, false, senml_index);
     }
   }
 #endif
 #ifdef USE_LOCK
   for (auto *e : App.get_locks()) {
     if (!e->is_internal()) {
-      add_net_resource_(ENTITYTYPE_LOCK, e, true, senml_index);
+      this->add_net_resource_(ENTITYTYPE_LOCK, e, true, senml_index);
     }
   }
 #endif
 #ifdef USE_NUMBER
   for (auto *e : App.get_numbers()) {
     if (!e->is_internal()) {
-      add_net_resource_(ENTITYTYPE_NUMBER, e, true, senml_index);
+      this->add_net_resource_(ENTITYTYPE_NUMBER, e, true, senml_index);
     }
   }
 #endif
 #ifdef USE_SENSOR
   for (auto *e : App.get_sensors()) {
     if (!e->is_internal()) {
-      add_net_resource_(ENTITYTYPE_SENSOR, e, true, senml_index);
+      this->add_net_resource_(ENTITYTYPE_SENSOR, e, true, senml_index);
     }
   }
 #endif
 #ifdef USE_SWITCH
   for (auto *e : App.get_switches()) {
     if (!e->is_internal()) {
-      add_net_resource_(ENTITYTYPE_SWITCH, e, true, senml_index);
+      this->add_net_resource_(ENTITYTYPE_SWITCH, e, true, senml_index);
     }
   }
 #endif
 #ifdef USE_TEXT_SENSOR
   for (auto *e : App.get_text_sensors()) {
     if (!e->is_internal()) {
-      add_net_resource_(ENTITYTYPE_TEXT_SENSOR, e, true, senml_index);
+      this->add_net_resource_(ENTITYTYPE_TEXT_SENSOR, e, true, senml_index);
     }
   }
 #endif
 #ifdef USE_VALVE
   for (auto *e : App.get_valves()) {
     if (!e->is_internal()) {
-      add_net_resource_(ENTITYTYPE_VALVE, e, true, senml_index);
+      this->add_net_resource_(ENTITYTYPE_VALVE, e, true, senml_index);
     }
   }
 #endif
 #ifdef USE_LOGGER
-  add_net_resource_(ENTITYTYPE_LOG, nullptr, true, senml_index);
+  this->add_net_resource_(ENTITYTYPE_LOG, nullptr, true, senml_index);
   this->logs_resource_ = &this->resources_[this->resources_.size() - 1];
   this->log_buf_[0] = 0x9F;
   this->log_buf_pos_ = 1;
   if (logger::global_logger != nullptr)
     logger::global_logger->add_log_callback(this, CoapServer::log_callback);
-  this->set_timeout("log_flush", 1000, [this]() { this->flush_logs_(); });
+  this->set_interval(LOG_FLUSH_ID, 1000, [this]() { this->flush_logs_(); });
 #endif
 }
 
@@ -368,48 +368,48 @@ void CoapServerNet::process_datagram_(const uint8_t *buf, size_t len, const sock
   ESP_LOGV(TAG, "CoAP Net: rx type=%u code=0x%02x path=%s len=%u", pkt.type, pkt.code, pkt.uri_path, (unsigned) len);
 
   if (pkt.type == 2 || pkt.type == 3) {  // ACK or RST — response to a CON notification we sent
-    handle_con_response_(pkt, *peer);
+    this->handle_con_response_(pkt, *peer);
     return;
   }
 
   if (pkt.type == 1 && (pkt.code & 0xE0) == 0x40) {  // NON 2.xx — response to server-initiated GET /ping
-    touch_client_(*peer);
+    this->touch_client_(*peer);
     return;
   }
 
   if (strcmp(pkt.uri_path, ".well-known/core") == 0) {
-    handle_well_known_core_(pkt, *peer);
+    this->handle_well_known_core_(pkt, *peer);
     return;
   }
   if (strcmp(pkt.uri_path, "info") == 0) {
-    handle_info_request_(pkt, *peer);
+    this->handle_info_request_(pkt, *peer);
     return;
   }
   if (strcmp(pkt.uri_path, "ping") == 0) {
-    handle_ping_request_(pkt, *peer);
+    this->handle_ping_request_(pkt, *peer);
     return;
   }
 
-  NetCoapResource *res = find_resource_(pkt.uri_path);
+  NetCoapResource *res = this->find_resource_(pkt.uri_path);
   if (res == nullptr) {
     this->builder_.begin(resp_type(pkt.type), 0x84, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(this->builder_.buf, this->builder_.pos, peer);
+    this->send_response(this->builder_.buf, this->builder_.pos, peer);
     return;
   }
 
 #ifdef USE_LOGGER
   if (res->type == ENTITYTYPE_LOG) {
-    handle_logs_request_(pkt, *peer);
+    this->handle_logs_request_(pkt, *peer);
     return;
   }
 #endif
 #ifdef USE_BUTTON
   if (res->type == ENTITYTYPE_BUTTON) {
-    handle_button_request_(pkt, *peer, res);
+    this->handle_button_request_(pkt, *peer, res);
     return;
   }
 #endif
-  handle_entity_request_(pkt, *peer, res);
+  this->handle_entity_request_(pkt, *peer, res);
 }
 
 // ---------------------------------------------------------------------------
@@ -441,14 +441,14 @@ void CoapServerNet::handle_well_known_core_(const CoapPacket &pkt, const sockadd
   // Pre-check before multiplying to avoid uint32_t overflow on large block2_num.
   if ((size_t) pkt.block2_num > this->link_format_size_ / block_size) {
     this->builder_.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(this->builder_.buf, this->builder_.pos, &peer);
+    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
     return;
   }
   uint32_t offset = pkt.block2_num * (uint32_t) block_size;
 
   if (offset >= this->link_format_size_) {
     this->builder_.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(this->builder_.buf, this->builder_.pos, &peer);
+    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
     return;
   }
 
@@ -468,7 +468,7 @@ void CoapServerNet::handle_well_known_core_(const CoapPacket &pkt, const sockadd
   this->builder_.option_uint(23, block2_val);
   this->builder_.payload_marker();
   this->builder_.append(this->link_format_buf_.get() + offset, len);
-  send_response(this->builder_.buf, this->builder_.pos, &peer);
+  this->send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +482,7 @@ void CoapServerNet::handle_info_request_(const CoapPacket &pkt, const sockaddr_s
   size_t payload_len = encode_device_info(payload, sizeof(payload), this);
   if (payload_len == 0) {
     this->builder_.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(this->builder_.buf, this->builder_.pos, &peer);
+    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
     return;
   }
   this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
@@ -490,7 +490,7 @@ void CoapServerNet::handle_info_request_(const CoapPacket &pkt, const sockaddr_s
   this->builder_.option(12, &cf, 1);
   this->builder_.payload_marker();
   this->builder_.append(payload, payload_len);
-  send_response(this->builder_.buf, this->builder_.pos, &peer);
+  this->send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 
 // ---------------------------------------------------------------------------
@@ -502,7 +502,7 @@ void CoapServerNet::handle_ping_request_(const CoapPacket &pkt, const sockaddr_s
     return;
 
   bool boot_signal = false;
-  NetCoapClient *client = find_client_(peer);
+  NetCoapClient *client = this->find_client_(peer);
   if (client != nullptr) {
     client->last_response_ms = millis();
     client->ping_miss_count = 0;
@@ -522,7 +522,7 @@ void CoapServerNet::handle_ping_request_(const CoapPacket &pkt, const sockaddr_s
   this->builder_.option(12, &cf, 1);
   this->builder_.payload_marker();
   this->builder_.append(payload_buf, plen);
-  send_response(this->builder_.buf, this->builder_.pos, &peer);
+  this->send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 
 // ---------------------------------------------------------------------------
@@ -531,7 +531,7 @@ void CoapServerNet::handle_ping_request_(const CoapPacket &pkt, const sockaddr_s
 
 void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr_storage &peer,
                                            NetCoapResource *resource) {
-  touch_client_(peer);
+  this->touch_client_(peer);
 
 #ifdef USE_COAP_OSCORE
   size_t oscore_plain_len = 0;
@@ -539,7 +539,7 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
   if (!this->oscore_unprotect_request_(pkt, resource, this->oscore_plain_, sizeof(this->oscore_plain_),
                                        &oscore_plain_len, &oscore_req_info)) {
     this->builder_.begin(resp_type(pkt.type), 0x81, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(this->builder_.buf, this->builder_.pos, &peer);
+    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
     return;
   }
   const bool oscore_protected = (oscore_plain_len > 0);
@@ -574,17 +574,17 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
                    this->get_subscription_confirm() ? LOG_STR_LITERAL("CON") : LOG_STR_LITERAL("NON"),
                    is_con ? LOG_STR_LITERAL("CON") : LOG_STR_LITERAL("NON"));
           this->builder_.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
-          send_response(this->builder_.buf, this->builder_.pos, &peer);
+          this->send_response(this->builder_.buf, this->builder_.pos, &peer);
           return;
         }
         // Deregister stale observer from same client
-        NetCoapObserver *stale = get_observer_(pkt.token, pkt.token_len, peer);
+        NetCoapObserver *stale = this->get_observer_(pkt.token, pkt.token_len, peer);
         if (stale != nullptr) {
           ESP_LOGD(TAG, "Replace stale observer from restarted client");
-          free_observer_(stale);
+          this->free_observer_(stale);
         }
         ESP_LOGD(TAG, "Create Observer: /%s", resource->path);
-        observer = new_observer_(resource, peer, pkt.token, pkt.token_len, is_con);
+        observer = this->new_observer_(resource, peer, pkt.token, pkt.token_len, is_con);
 #ifdef USE_COAP_OSCORE
         if (observer != nullptr && oscore_protected) {
           memcpy(observer->oscore_req_piv, oscore_req_info.piv, oscore_req_info.piv_len);
@@ -593,21 +593,21 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
           observer->oscore_req_kid_len = oscore_req_info.kid_len;
         }
 #endif
-        if (observer != nullptr && find_client_(peer) == nullptr)
-          new_client_(peer);
+        if (observer != nullptr && this->find_client_(peer) == nullptr)
+          this->new_client_(peer);
       } else if (pkt.observe == 1) {
-        NetCoapObserver *obs = get_observer_(pkt.token, pkt.token_len, peer);
+        NetCoapObserver *obs = this->get_observer_(pkt.token, pkt.token_len, peer);
         if (obs != nullptr) {
           ESP_LOGD(TAG, "Cancel Observer: /%s", resource->path);
-          free_observer_(obs);
+          this->free_observer_(obs);
         }
       }
     }
 
-    cbor_len = cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), resource->entity, resource->type);
+    cbor_len = this->cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), resource->entity, resource->type);
     if (cbor_len == 0) {
       this->builder_.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
-      send_response(this->builder_.buf, this->builder_.pos, &peer);
+      this->send_response(this->builder_.buf, this->builder_.pos, &peer);
       return;
     }
 
@@ -615,11 +615,11 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
     if (oscore_protected) {
       size_t inner_len =
           oscore_build_inner_cbor(0x45, this->cbor_buf_, cbor_len, this->oscore_inner_, sizeof(this->oscore_inner_));
-      size_t cipher_len = oscore_protect_response_(this->oscore_inner_, inner_len, oscore_req_info, false,
-                                                   this->oscore_cipher_, sizeof(this->oscore_cipher_));
+      size_t cipher_len = this->oscore_protect_response_(this->oscore_inner_, inner_len, oscore_req_info, false,
+                                                         this->oscore_cipher_, sizeof(this->oscore_cipher_));
       if (cipher_len == 0) {
         this->builder_.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
-        send_response(this->builder_.buf, this->builder_.pos, &peer);
+        this->send_response(this->builder_.buf, this->builder_.pos, &peer);
         return;
       }
       // Outer code 2.04, or 2.05 when the reply carries Observe (RFC 8613 §4.1.3.5)
@@ -630,7 +630,7 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
       this->builder_.option_empty(9);  // OSCORE option empty
       this->builder_.payload_marker();
       this->builder_.append(this->oscore_cipher_, cipher_len);
-      send_response(this->builder_.buf, this->builder_.pos, &peer);
+      this->send_response(this->builder_.buf, this->builder_.pos, &peer);
       return;
     }
 #endif
@@ -641,35 +641,35 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
     this->builder_.option(12, &cf, 1);
     this->builder_.payload_marker();
     this->builder_.append(this->cbor_buf_, cbor_len);
-    send_response(this->builder_.buf, this->builder_.pos, &peer);
+    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
 
   } else if (effective_code == 0x02 &&  // POST
              (resource->type == ENTITYTYPE_SWITCH || resource->type == ENTITYTYPE_NUMBER ||
               resource->type == ENTITYTYPE_LOCK || resource->type == ENTITYTYPE_VALVE)) {
     apply_entity_post(resource->entity, resource->type, resource->action, payload_ptr, payload_len);
 
-    cbor_len = cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), resource->entity, resource->type);
+    cbor_len = this->cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), resource->entity, resource->type);
     if (cbor_len == 0) {
       this->builder_.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
-      send_response(this->builder_.buf, this->builder_.pos, &peer);
+      this->send_response(this->builder_.buf, this->builder_.pos, &peer);
       return;
     }
 #ifdef USE_COAP_OSCORE
     if (oscore_protected) {
       size_t inner_len =
           oscore_build_inner_cbor(0x44, this->cbor_buf_, cbor_len, this->oscore_inner_, sizeof(this->oscore_inner_));
-      size_t cipher_len = oscore_protect_response_(this->oscore_inner_, inner_len, oscore_req_info, false,
-                                                   this->oscore_cipher_, sizeof(this->oscore_cipher_));
+      size_t cipher_len = this->oscore_protect_response_(this->oscore_inner_, inner_len, oscore_req_info, false,
+                                                         this->oscore_cipher_, sizeof(this->oscore_cipher_));
       if (cipher_len == 0) {
         this->builder_.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);
-        send_response(this->builder_.buf, this->builder_.pos, &peer);
+        this->send_response(this->builder_.buf, this->builder_.pos, &peer);
         return;
       }
       this->builder_.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
       this->builder_.option_empty(9);
       this->builder_.payload_marker();
       this->builder_.append(this->oscore_cipher_, cipher_len);
-      send_response(this->builder_.buf, this->builder_.pos, &peer);
+      this->send_response(this->builder_.buf, this->builder_.pos, &peer);
       return;
     }
 #endif
@@ -678,11 +678,11 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
     this->builder_.option(12, &cf, 1);
     this->builder_.payload_marker();
     this->builder_.append(this->cbor_buf_, cbor_len);
-    send_response(this->builder_.buf, this->builder_.pos, &peer);
+    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
 
   } else {
     this->builder_.begin(resp_type(pkt.type), 0x85, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(this->builder_.buf, this->builder_.pos, &peer);
+    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
   }
 }
 
@@ -693,19 +693,19 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
 #ifdef USE_BUTTON
 void CoapServerNet::handle_button_request_(const CoapPacket &pkt, const sockaddr_storage &peer,
                                            NetCoapResource *resource) {
-  touch_client_(peer);
+  this->touch_client_(peer);
   if (pkt.code != 0x02) {  // POST
     this->builder_.begin(resp_type(pkt.type), 0x85, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(this->builder_.buf, this->builder_.pos, &peer);
+    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
     return;
   }
 #ifdef USE_COAP_OSCORE
   size_t oscore_plain_len = 0;
   OscoreRequestInfo oscore_req_info{};
-  if (!oscore_unprotect_request_(pkt, resource, this->oscore_plain_, sizeof(this->oscore_plain_), &oscore_plain_len,
-                                 &oscore_req_info)) {
+  if (!this->oscore_unprotect_request_(pkt, resource, this->oscore_plain_, sizeof(this->oscore_plain_),
+                                       &oscore_plain_len, &oscore_req_info)) {
     this->builder_.begin(resp_type(pkt.type), 0x81, pkt.message_id, pkt.token, pkt.token_len);
-    send_response(this->builder_.buf, this->builder_.pos, &peer);
+    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
     return;
   }
   // A protected request's outer code is always POST; its method is the inner code
@@ -719,19 +719,19 @@ void CoapServerNet::handle_button_request_(const CoapPacket &pkt, const sockaddr
   if (oscore_plain_len > 0) {
     uint8_t inner[1] = {static_cast<uint8_t>(post ? 0x44 : 0x85)};  // 2.04 Changed or 4.05 Method Not Allowed
     uint8_t cipher[OSCORE_TAG_LEN + 4];
-    size_t cipher_len = oscore_protect_response_(inner, 1, oscore_req_info, false, cipher, sizeof(cipher));
+    size_t cipher_len = this->oscore_protect_response_(inner, 1, oscore_req_info, false, cipher, sizeof(cipher));
     if (cipher_len > 0) {
       this->builder_.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
       this->builder_.option_empty(9);
       this->builder_.payload_marker();
       this->builder_.append(cipher, cipher_len);
-      send_response(this->builder_.buf, this->builder_.pos, &peer);
+      this->send_response(this->builder_.buf, this->builder_.pos, &peer);
     }
     return;
   }
 #endif
   this->builder_.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
-  send_response(this->builder_.buf, this->builder_.pos, &peer);
+  this->send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 #endif
 
@@ -748,7 +748,7 @@ void CoapServerNet::handle_con_response_(const CoapPacket &pkt, const sockaddr_s
       continue;
     if (pkt.type == 3) {  // RST — client rejects notifications; deregister
       ESP_LOGI(TAG, "CoAP Net: CON notify RST, freeing observer");
-      free_observer_(obs);
+      this->free_observer_(obs);
     } else {  // ACK — notification delivered
       obs->con_pending = false;
     }
@@ -773,10 +773,10 @@ void CoapServerNet::on_entity_update(EntityBase *entity) {
   if (resource == nullptr)
     return;
   ESP_LOGV(TAG, "On Update: /%s", resource->path);
-  size_t payload_len = cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), resource->entity, resource->type);
+  size_t payload_len = this->cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), resource->entity, resource->type);
   if (payload_len == 0)
     return;
-  notify_observers_(resource, this->cbor_buf_, payload_len);
+  this->notify_observers_(resource, this->cbor_buf_, payload_len);
 }
 
 void CoapServerNet::notify_observers_(NetCoapResource *resource, const uint8_t *payload, size_t payload_len) {
@@ -870,7 +870,7 @@ void CoapServerNet::resend_con_(NetCoapObserver *obs, uint32_t now) {
     return;
   }
 #endif
-  size_t len = cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), obs->resource->entity, obs->resource->type);
+  size_t len = this->cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), obs->resource->entity, obs->resource->type);
   if (len == 0) {
     obs->con_sent_ms = now;  // nothing to send; wait out this attempt
     return;
@@ -977,7 +977,7 @@ NetCoapClient *CoapServerNet::new_client_(const sockaddr_storage &peer) {
     char addr_str[ADDR_STR_LEN];
     addr_to_str(peer, addr_str, sizeof(addr_str));
     this->client_connected_callback_(std::string(addr_str));
-    ping_client_(result);
+    this->ping_client_(result);
   }
   return result;
 }
@@ -1004,7 +1004,7 @@ NetCoapClient *CoapServerNet::find_client_(const sockaddr_storage &peer) {
 }
 
 void CoapServerNet::touch_client_(const sockaddr_storage &peer) {
-  NetCoapClient *c = find_client_(peer);
+  NetCoapClient *c = this->find_client_(peer);
   if (c != nullptr) {
     c->last_response_ms = millis();
     c->ping_miss_count = 0;
@@ -1012,7 +1012,7 @@ void CoapServerNet::touch_client_(const sockaddr_storage &peer) {
 }
 
 void CoapServerNet::free_client_(NetCoapClient *client) {
-  cancel_ping_client_(client);
+  this->cancel_ping_client_(client);
   sockaddr_storage peer_addr = client->peer_addr;
   client->active = false;
   this->active_client_count_--;
@@ -1037,7 +1037,7 @@ void CoapServerNet::free_client_(NetCoapClient *client) {
 }
 
 void CoapServerNet::ping_client_(NetCoapClient *client) {
-  this->set_timeout(PING_TIMEOUT_ID_BASE + client->slot, this->client_ping_interval_ms_, [this, client]() {
+  this->set_interval(PING_ID_BASE + client->slot, this->client_ping_interval_ms_, [this, client]() {
     if (!client->active)
       return;
     uint32_t now = millis();
@@ -1047,7 +1047,7 @@ void CoapServerNet::ping_client_(NetCoapClient *client) {
       if (now - client->last_response_ms > timeout_ms) {
         if (++client->ping_miss_count >= this->client_ping_retry_) {
           ESP_LOGI(TAG, "CoAP Net: client ping timeout, freeing slot %u", client->slot);
-          free_client_(client);
+          this->free_client_(client);
           return;
         }
       }
@@ -1057,15 +1057,12 @@ void CoapServerNet::ping_client_(NetCoapClient *client) {
       this->builder_.begin(1, 0x01, this->next_msg_id_++, nullptr, 0);  // NON GET
       this->builder_.option(11, (const uint8_t *) "ping", 4);
       client->last_ping_sent_ms = now;
-      send_response(this->builder_.buf, this->builder_.pos, &client->peer_addr);
+      this->send_response(this->builder_.buf, this->builder_.pos, &client->peer_addr);
     }
-    ping_client_(client);
   });
 }
 
-void CoapServerNet::cancel_ping_client_(NetCoapClient *client) {
-  this->cancel_timeout(PING_TIMEOUT_ID_BASE + client->slot);
-}
+void CoapServerNet::cancel_ping_client_(NetCoapClient *client) { this->cancel_interval(PING_ID_BASE + client->slot); }
 
 // ---------------------------------------------------------------------------
 // Observer management
@@ -1103,7 +1100,7 @@ NetCoapObserver *CoapServerNet::new_observer_(NetCoapResource *resource, const s
   obs->next = this->active_observers_;
   this->active_observers_ = obs;
   if (!is_con) {
-    NetCoapClient *c = find_client_(peer);
+    NetCoapClient *c = this->find_client_(peer);
     if (c != nullptr)
       c->has_non_observer = true;
   }
@@ -1125,7 +1122,7 @@ void CoapServerNet::free_observer_(NetCoapObserver *observer) {
       }
     }
     if (!has_non) {
-      NetCoapClient *c = find_client_(observer->peer_addr);
+      NetCoapClient *c = this->find_client_(observer->peer_addr);
       if (c != nullptr)
         c->has_non_observer = false;
     }
@@ -1177,12 +1174,11 @@ void CoapServerNet::flush_logs_() {
   uint8_t payload[LOG_BUF_SIZE];
   size_t payload_len = this->take_log_payload_(payload);
   if (payload_len > 0)
-    notify_observers_(this->logs_resource_, payload, payload_len);
-  this->set_timeout("log_flush", 1000, [this]() { this->flush_logs_(); });
+    this->notify_observers_(this->logs_resource_, payload, payload_len);
 }
 
 void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_storage &peer) {
-  touch_client_(peer);
+  this->touch_client_(peer);
   if (pkt.code != 0x01)
     return;  // GET only
   bool registered = false;
@@ -1190,17 +1186,17 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_s
     bool is_con = (pkt.type == 0);
     if (this->get_subscription_confirm() != is_con) {
       this->builder_.begin(resp_type(pkt.type), 0x80, pkt.message_id, pkt.token, pkt.token_len);
-      send_response(this->builder_.buf, this->builder_.pos, &peer);
+      this->send_response(this->builder_.buf, this->builder_.pos, &peer);
       return;
     }
-    NetCoapObserver *stale = get_observer_(pkt.token, pkt.token_len, peer);
+    NetCoapObserver *stale = this->get_observer_(pkt.token, pkt.token_len, peer);
     if (stale != nullptr)
-      free_observer_(stale);
-    registered = new_observer_(this->logs_resource_, peer, pkt.token, pkt.token_len, is_con) != nullptr;
+      this->free_observer_(stale);
+    registered = this->new_observer_(this->logs_resource_, peer, pkt.token, pkt.token_len, is_con) != nullptr;
   } else if (pkt.observe_present && pkt.observe == 1) {
-    NetCoapObserver *obs = get_observer_(pkt.token, pkt.token_len, peer);
+    NetCoapObserver *obs = this->get_observer_(pkt.token, pkt.token_len, peer);
     if (obs != nullptr)
-      free_observer_(obs);
+      this->free_observer_(obs);
   }
   static const uint8_t EMPTY_CBOR_ARRAY[] = {0x80};
   this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
@@ -1210,7 +1206,7 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_s
   this->builder_.option(12, &cf, 1);
   this->builder_.payload_marker();
   this->builder_.append(EMPTY_CBOR_ARRAY, sizeof(EMPTY_CBOR_ARRAY));
-  send_response(this->builder_.buf, this->builder_.pos, &peer);
+  this->send_response(this->builder_.buf, this->builder_.pos, &peer);
 }
 #endif
 

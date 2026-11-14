@@ -22,7 +22,9 @@
 namespace esphome::coap_server {
 
 ESPHOME_LOG_TAG(TAG, "coap_server");
-static constexpr uint32_t PING_TIMEOUT_ID_BASE = 0;
+// Scheduler ids: the log flush, then one client ping interval per client slot
+static constexpr uint32_t LOG_FLUSH_ID = 0;
+static constexpr uint32_t PING_ID_BASE = 1;
 
 // Determine the response type from the type of request CON or NON
 static otCoapType response_type(otMessage *request) {
@@ -42,8 +44,8 @@ void CoapServerOT::setup() {
   otInstance *instance = lock.get_instance();
   otError err = otCoapStart(instance, USE_COAP_SERVER_PORT);
   if (err != OT_ERROR_NONE) {
-    ESP_LOGE(TAG, "otCoapStart failed: %s", otThreadErrorToString(err));
-    mark_failed();
+    ESP_LOGE(TAG, "otCoapStart: %s", otThreadErrorToString(err));
+    this->mark_failed(LOG_STR("CoAP start failed"));
     return;
   }
   ESP_LOGI(TAG, "CoAP server started on port %u", USE_COAP_SERVER_PORT);
@@ -104,67 +106,66 @@ void CoapServerOT::setup() {
   for (binary_sensor::BinarySensor *entity : App.get_binary_sensors()) {
     if (entity->is_internal())
       continue;
-    add_coap_resource_(EntityType::ENTITYTYPE_BINARY_SENSOR, entity, true, senml_index);
+    this->add_coap_resource_(EntityType::ENTITYTYPE_BINARY_SENSOR, entity, true, senml_index);
   }
 #endif  // USE_BINARY_SENSOR
 #ifdef USE_BUTTON
   for (button::Button *entity : App.get_buttons()) {
     if (entity->is_internal())
       continue;
-    add_coap_resource_(EntityType::ENTITYTYPE_BUTTON, entity, false, senml_index);
+    this->add_coap_resource_(EntityType::ENTITYTYPE_BUTTON, entity, false, senml_index);
   }
 #endif  // USE_BUTTON
 #ifdef USE_LOCK
   for (lock::Lock *entity : App.get_locks()) {
     if (entity->is_internal())
       continue;
-    add_coap_resource_(EntityType::ENTITYTYPE_LOCK, entity, true, senml_index);
+    this->add_coap_resource_(EntityType::ENTITYTYPE_LOCK, entity, true, senml_index);
   }
 #endif  // USE_LOCK
 #ifdef USE_NUMBER
   for (number::Number *entity : App.get_numbers()) {
     if (entity->is_internal())
       continue;
-    add_coap_resource_(EntityType::ENTITYTYPE_NUMBER, entity, true, senml_index);
+    this->add_coap_resource_(EntityType::ENTITYTYPE_NUMBER, entity, true, senml_index);
   }
 #endif  // USE_NUMBER
 #ifdef USE_SENSOR
   for (sensor::Sensor *entity : App.get_sensors()) {
     if (entity->is_internal())
       continue;
-    add_coap_resource_(EntityType::ENTITYTYPE_SENSOR, entity, true, senml_index);
+    this->add_coap_resource_(EntityType::ENTITYTYPE_SENSOR, entity, true, senml_index);
   }
 #endif  // USE_SENSOR
 #ifdef USE_SWITCH
   for (switch_::Switch *entity : App.get_switches()) {
     if (entity->is_internal())
       continue;
-    add_coap_resource_(EntityType::ENTITYTYPE_SWITCH, entity, true, senml_index);
+    this->add_coap_resource_(EntityType::ENTITYTYPE_SWITCH, entity, true, senml_index);
   }
 #endif  // USE_SWITCH
 #ifdef USE_TEXT_SENSOR
   for (text_sensor::TextSensor *entity : App.get_text_sensors()) {
     if (entity->is_internal())
       continue;
-    add_coap_resource_(EntityType::ENTITYTYPE_TEXT_SENSOR, entity, true, senml_index);
+    this->add_coap_resource_(EntityType::ENTITYTYPE_TEXT_SENSOR, entity, true, senml_index);
   }
 #endif  // USE_TEXT_SENSOR
 #ifdef USE_VALVE
   for (valve::Valve *entity : App.get_valves()) {
     if (entity->is_internal())
       continue;
-    add_coap_resource_(EntityType::ENTITYTYPE_VALVE, entity, true, senml_index);
+    this->add_coap_resource_(EntityType::ENTITYTYPE_VALVE, entity, true, senml_index);
   }
 #endif  // USE_VALVE
 #ifdef USE_LOGGER
-  add_coap_resource_(EntityType::ENTITYTYPE_LOG, nullptr, true, senml_index);
+  this->add_coap_resource_(EntityType::ENTITYTYPE_LOG, nullptr, true, senml_index);
   this->logs_resource_ = &(this->resources_[this->resources_.size() - 1]);
   this->log_buf_[0] = 0x9F;  // CBOR indefinite-length array start
   this->log_buf_pos_ = 1;
   if (logger::global_logger != nullptr)
     logger::global_logger->add_log_callback(this, CoapServer::log_callback);
-  uint32_t flush_ms = std::max(otLinkGetPollPeriod(instance), (uint32_t) 1000);
-  this->set_timeout("log_flush", flush_ms, [this]() { this->flush_logs_(); });
+  this->schedule_log_flush_();
 #endif  // USE_LOGGER
 
 }  // setup()
@@ -476,7 +477,7 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
       }
     }
     ehCoapResource *cbor_res = (observer != nullptr) ? observer->resource : resource;
-    payload_len = cbor_output_(payload_buffer, COAP_PAYLOAD_MAX_SIZE, cbor_res->entity, cbor_res->type);
+    payload_len = this->cbor_output_(payload_buffer, COAP_PAYLOAD_MAX_SIZE, cbor_res->entity, cbor_res->type);
     if (payload_len == 0) {
       ESP_LOGW(TAG, "cbor_output_ returned 0 for path=%s type=%d", resource->mUriPath, (int) resource->type);
       SuccessOrExit(
@@ -543,7 +544,7 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
 #endif
       apply_entity_post(resource->entity, type, resource->action, msg_buf, msg_len);
     }
-    payload_len = cbor_output_(payload_buffer, COAP_PAYLOAD_MAX_SIZE, resource->entity, resource->type);
+    payload_len = this->cbor_output_(payload_buffer, COAP_PAYLOAD_MAX_SIZE, resource->entity, resource->type);
 
     if (payload_len == 0) {
       SuccessOrExit(
@@ -1091,7 +1092,7 @@ ehCoapClient *CoapServerOT::new_client_(const otMessageInfo &message_info) {
 }
 
 void CoapServerOT::ping_client_(ehCoapClient *client) {
-  this->set_timeout(PING_TIMEOUT_ID_BASE + client->slot, this->client_ping_interval_ms_, [this, client]() {
+  this->set_interval(PING_ID_BASE + client->slot, this->client_ping_interval_ms_, [this, client]() {
     if (!client->active)
       return;
     uint32_t now = millis();
@@ -1116,10 +1117,8 @@ void CoapServerOT::ping_client_(ehCoapClient *client) {
         return;
       }
     }
-    if (!client->has_non_observer || client_recently_active) {
-      this->ping_client_(client);
+    if (!client->has_non_observer || client_recently_active)
       return;
-    }
     openthread::InstanceLock lock = openthread::InstanceLock::acquire();
     otInstance *instance = lock.get_instance();
     otMessage *message = otCoapNewMessage(instance, nullptr);
@@ -1150,13 +1149,10 @@ void CoapServerOT::ping_client_(ehCoapClient *client) {
       if (err != OT_ERROR_NONE)
         otMessageFree(message);
     }
-    this->ping_client_(client);
   });
 }
 
-void CoapServerOT::cancel_ping_client_(ehCoapClient *client) {
-  this->cancel_timeout(PING_TIMEOUT_ID_BASE + client->slot);
-}
+void CoapServerOT::cancel_ping_client_(ehCoapClient *client) { this->cancel_interval(PING_ID_BASE + client->slot); }
 
 ehCoapClient *CoapServerOT::find_client_(const otIp6Address &addr) {
   for (auto &client : this->active_clients_) {
@@ -1296,7 +1292,7 @@ void CoapServerOT::on_entity_update(EntityBase *entity) {
     return;
   ESP_LOGV(TAG, "On Update: /%s", resource->path);
   uint8_t payload_buffer[COAP_PAYLOAD_MAX_SIZE];
-  size_t payload_len = cbor_output_(payload_buffer, COAP_PAYLOAD_MAX_SIZE, resource->entity, resource->type);
+  size_t payload_len = this->cbor_output_(payload_buffer, COAP_PAYLOAD_MAX_SIZE, resource->entity, resource->type);
   if (payload_len == 0) {
     ESP_LOGW(TAG, "cbor encode failed, skip notifications");
     return;
@@ -1435,8 +1431,16 @@ void CoapServerOT::flush_logs_() {
   size_t payload_len = this->take_log_payload_(payload);
   if (payload_len > 0)
     this->notify_observers_(this->logs_resource_, payload, payload_len);
-  uint32_t flush_ms = std::max(otLinkGetPollPeriod(this->instance_), (uint32_t) 1000);
-  this->set_timeout("log_flush", flush_ms, [this]() { this->flush_logs_(); });
+  this->schedule_log_flush_();
+}
+
+void CoapServerOT::schedule_log_flush_() {
+  // The poll period can change at run time, so the flush follows it
+  const uint32_t flush_ms = std::max(otLinkGetPollPeriod(this->instance_), (uint32_t) 1000);
+  if (flush_ms == this->log_flush_ms_)
+    return;
+  this->log_flush_ms_ = flush_ms;
+  this->set_interval(LOG_FLUSH_ID, flush_ms, [this]() { this->flush_logs_(); });
 }
 
 #endif  // USE_LOGGER
