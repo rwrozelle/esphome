@@ -29,6 +29,11 @@ void set_request_oscore_option(const uint8_t *value, uint8_t len);
 
 // Requests sent with otCoapSendRequest (notifications, pings)
 int requests_sent();
+// The last of them: its payload, code, type and token; code and type are -1 after reset()
+std::string last_request();
+int last_request_code();
+int last_request_type();
+std::string last_request_token();
 // The last request sent with a response handler, until it is completed
 bool has_pending_request();
 void *pending_request_ctx();

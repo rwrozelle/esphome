@@ -55,6 +55,21 @@ class OscoreServer : public TestableCoapServerNet {
     return oscore_build_inner_cbor(0x45, payload, payload_len, out, out_size);
   }
 
+  // As after a request that returned the Echo value; most tests do not need the Echo exchange
+  void start_replay_window() {
+    this->oscore_replay_top_ = 0;
+    this->oscore_replay_mask_ = 1;
+  }
+  void reset_replay_window() {  // as after a reboot
+    this->oscore_replay_top_ = 0;
+    this->oscore_replay_mask_ = 0;
+  }
+  const uint8_t *echo() const { return this->oscore_echo_; }
+  static bool walk_inner(const std::vector<uint8_t> &plain, uint16_t number, const uint8_t **value, size_t *len) {
+    size_t offset = 0;
+    return oscore_walk_inner(plain.data(), plain.size(), number, &offset, value, len);
+  }
+
   uint32_t sender_seq() const { return this->oscore_sender_seq_no_; }
   void set_sender_seq(uint32_t seq) { this->oscore_sender_seq_no_ = seq; }
   uint32_t seq_threshold() const { return this->oscore_seq_threshold_; }
@@ -88,6 +103,7 @@ class OscoreTest : public ::testing::Test {
     this->srv_.set_material({0x01}, {});
     ASSERT_TRUE(this->srv_.derive_keys());
     this->srv_.restore_seq();
+    this->srv_.start_replay_window();
   }
   OscoreServer srv_;
 };
@@ -423,6 +439,86 @@ TEST_F(OscoreTest, UnprotectRejectsReplay) {
                                     &plain_len, &req));
 }
 
+// Inner message: the code, then Echo (252) with an 8-byte value
+std::vector<uint8_t> inner_with_echo(uint8_t code, const uint8_t *echo) {
+  std::vector<uint8_t> inner{code, 0xD8, 252 - 13};
+  inner.insert(inner.end(), echo, echo + 8);
+  return inner;
+}
+
+// Unprotects a request with Partial IV seq; returns the result and whether an Echo challenge is asked for
+bool send_request(OscoreServer &srv, uint8_t seq, const std::vector<uint8_t> &inner, bool *echo_required) {
+  const uint8_t piv[] = {seq};
+  const uint8_t opt[] = {0x01, seq};
+  uint8_t ciphertext[256];
+  size_t cipher_len = 0;
+  EXPECT_TRUE(client_encrypt(srv, piv, sizeof(piv), inner.data(), inner.size(), ciphertext, &cipher_len));
+  uint8_t plain[256];
+  size_t plain_len = 0;
+  CoapServer::OscoreRequestInfo req{};
+  bool ok = srv.unprotect(opt, sizeof(opt), ciphertext, (uint16_t) cipher_len, plain, sizeof(plain), &plain_len, &req);
+  *echo_required = req.echo_required;
+  return ok;
+}
+
+TEST(OscoreInnerOption, FindsEcho) {
+  const uint8_t echo[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  std::vector<uint8_t> plain = inner_with_echo(0x01, echo);
+  plain.insert(plain.begin() + 1, {0x61, 0x00});  // Observe (6) first, so Echo's delta is 246
+  plain[3] = 0xD8;
+  plain[4] = 246 - 13;
+  const uint8_t *value = nullptr;
+  size_t len = 0;
+  ASSERT_TRUE(OscoreServer::walk_inner(plain, 252, &value, &len));
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(len, 8u);
+  EXPECT_EQ(memcmp(value, echo, 8), 0);
+  ASSERT_TRUE(OscoreServer::walk_inner(plain, 9, &value, &len));
+  EXPECT_EQ(value, nullptr);
+}
+
+// After a reboot only a request returning this boot's Echo value starts the replay window (RFC 8613 B.1.2)
+TEST_F(OscoreTest, FirstRequestAfterRebootNeedsEcho) {
+  this->srv_.reset_replay_window();
+  const uint8_t wrong_echo[8] = {};
+  bool echo_required = false;
+
+  EXPECT_FALSE(send_request(this->srv_, 100, {0x01}, &echo_required));
+  EXPECT_TRUE(echo_required);
+  EXPECT_FALSE(send_request(this->srv_, 101, inner_with_echo(0x01, wrong_echo), &echo_required));
+  EXPECT_TRUE(echo_required);
+
+  EXPECT_TRUE(send_request(this->srv_, 102, inner_with_echo(0x01, this->srv_.echo()), &echo_required));
+  EXPECT_FALSE(echo_required);
+  EXPECT_TRUE(send_request(this->srv_, 103, {0x01}, &echo_required));  // started: no Echo needed any more
+}
+
+// The request that starts the window marks every older number as seen
+TEST_F(OscoreTest, EchoRequestMarksOlderNumbersSeen) {
+  this->srv_.reset_replay_window();
+  bool echo_required = false;
+
+  ASSERT_TRUE(send_request(this->srv_, 100, inner_with_echo(0x01, this->srv_.echo()), &echo_required));
+  EXPECT_FALSE(send_request(this->srv_, 99, {0x01}, &echo_required));  // sent before the reboot, recorded
+  EXPECT_TRUE(echo_required);  // a genuine but old request is asked to come back with a new number
+  EXPECT_FALSE(send_request(this->srv_, 37, {0x01}, &echo_required));
+  EXPECT_TRUE(send_request(this->srv_, 102, {0x01}, &echo_required));
+  EXPECT_TRUE(send_request(this->srv_, 101, {0x01}, &echo_required));  // out of order after the start is fine
+}
+
+TEST_F(OscoreTest, ForgedRequestGetsNoEchoChallenge) {
+  this->srv_.reset_replay_window();
+  const uint8_t opt[] = {0x01, 0x50};
+  uint8_t ciphertext[16] = {};
+  uint8_t plain[64];
+  size_t plain_len = 0;
+  CoapServer::OscoreRequestInfo req{};
+
+  EXPECT_FALSE(
+      this->srv_.unprotect(opt, sizeof(opt), ciphertext, sizeof(ciphertext), plain, sizeof(plain), &plain_len, &req));
+  EXPECT_FALSE(req.echo_required);
+}
+
 TEST_F(OscoreTest, UnprotectRejectsTamperedCiphertext) {
   const uint8_t piv[] = {0x02};
   const uint8_t opt[] = {0x01, 0x02};
@@ -517,14 +613,44 @@ TEST_F(OscoreTest, RestoreContinuesFromStoredThreshold) {
 TEST_F(OscoreTest, NotificationReachingThresholdSavesNextBlock) {
   this->srv_.set_sender_seq(0);
   this->srv_.save_seq();
-  this->srv_.set_sender_seq(1023);
   const uint8_t inner[] = {0x45};
   CoapServer::OscoreRequestInfo req{};
   uint8_t out[64];
 
+  this->srv_.set_sender_seq(1023);
   ASSERT_GT(this->srv_.protect(inner, sizeof(inner), req, true, out, sizeof(out)), 0u);
+  EXPECT_EQ(OscoreServer::stored_seq(), 1024u);  // 1023 was still below the saved threshold
 
+  ASSERT_GT(this->srv_.protect(inner, sizeof(inner), req, true, out, sizeof(out)), 0u);
   EXPECT_EQ(OscoreServer::stored_seq(), 1024u + 1024u);
+  EXPECT_EQ(this->srv_.sender_seq(), 1025u);
+}
+
+// A number at or past a threshold that could not be saved would be used again after a reboot
+TEST_F(OscoreTest, FailedSaveHoldsNotifications) {
+  this->srv_.set_sender_seq(0);
+  this->srv_.save_seq();
+  this->srv_.set_sender_seq(1024);
+  const uint8_t inner[] = {0x45};
+  CoapServer::OscoreRequestInfo req{};
+  uint8_t out[64];
+
+  std::filesystem::remove_all(this->srv_.pref_dir());
+  EXPECT_EQ(this->srv_.protect(inner, sizeof(inner), req, true, out, sizeof(out)), 0u);
+  EXPECT_EQ(this->srv_.sender_seq(), 1024u);
+  EXPECT_TRUE(this->srv_.status_has_warning());
+
+  std::filesystem::create_directories(this->srv_.pref_dir());
+  EXPECT_GT(this->srv_.protect(inner, sizeof(inner), req, true, out, sizeof(out)), 0u);
+  EXPECT_EQ(this->srv_.sender_seq(), 1025u);
+  EXPECT_EQ(OscoreServer::stored_seq(), 1024u + 1024u);
+  EXPECT_FALSE(this->srv_.status_has_warning());
+}
+
+TEST_F(OscoreTest, ThresholdStopsAtMaximum) {
+  this->srv_.set_sender_seq(UINT32_MAX - 10);
+  this->srv_.save_seq();
+  EXPECT_EQ(this->srv_.seq_threshold(), UINT32_MAX);
 }
 
 TEST_F(OscoreTest, FailedSaveWarnsRetriesAndRecovers) {
@@ -724,6 +850,66 @@ TEST_F(OscoreTest, ProtectedObserveRegistrationRepliesWithOuterContent) {
   EXPECT_EQ(this->srv_.active_observer_count(), 1u);
 }
 
+// After a reboot: the first request gets a protected 4.01 with Echo under the device's own Partial IV; sent
+// again with that Echo it is answered
+TEST_F(OscoreTest, EchoChallengeRoundTrip) {
+  this->srv_.init_resources(2);
+  TestSensor s;
+  s.configure("temp");
+  s.state = 21.5f;
+  uint16_t idx = 1;
+  this->srv_.add_resource(ENTITYTYPE_SENSOR, &s, true, idx, false);
+  this->srv_.reset_replay_window();
+  const uint32_t device_seq = this->srv_.sender_seq();
+
+  const uint8_t piv1[] = {0x40};
+  const uint8_t opt1[] = {0x09, 0x40};
+  const uint8_t get[] = {0x01};
+  uint8_t ciphertext[256];
+  size_t cipher_len = 0;
+  ASSERT_TRUE(client_encrypt(this->srv_, piv1, sizeof(piv1), get, sizeof(get), ciphertext, &cipher_len));
+  this->srv_.inject(make_oscore_post("fp/1/g/1", opt1, sizeof(opt1), ciphertext, cipher_len), make_peer());
+
+  CoapServerNet::CoapPacket reply{};
+  ASSERT_TRUE(CoapServerNet::parse_coap(this->srv_.last_sent.data(), this->srv_.last_sent.size(), &reply));
+  EXPECT_EQ(reply.code, 0x44);  // outer 2.04
+  ASSERT_GE(reply.oscore_opt_len, 2u);
+  const uint8_t dev_piv_len = reply.oscore_opt[0] & 0x07;
+  ASSERT_GT(dev_piv_len, 0u);  // the device's own Partial IV, not the request's nonce
+  EXPECT_EQ(this->srv_.sender_seq(), device_seq + 1);
+  const uint8_t kid[] = {0x01};
+  uint8_t nonce[OSCORE_AES_NONCE_LEN];
+  OscoreServer::build_nonce(reply.oscore_opt + 1, dev_piv_len, kid, sizeof(kid), this->srv_.common_iv(), nonce);
+  uint8_t aad[80];
+  size_t aad_len = OscoreServer::build_aad(NO_BYTES, 0, piv1, sizeof(piv1), aad, sizeof(aad));
+  uint8_t plain[256];
+  size_t plain_len = 0;
+  ASSERT_TRUE(oscore_aes_ccm_decrypt(this->srv_.sender_key(), nonce, aad, aad_len, reply.payload, reply.payload_len,
+                                     plain, sizeof(plain), &plain_len));
+  ASSERT_EQ(plain_len, 11u);
+  EXPECT_EQ(plain[0], 0x81);  // 4.01
+  const uint8_t *echo = nullptr;
+  size_t echo_len = 0;
+  const std::vector<uint8_t> challenge(plain, plain + plain_len);
+  ASSERT_TRUE(OscoreServer::walk_inner(challenge, 252, &echo, &echo_len));
+  ASSERT_EQ(echo_len, 8u);
+  EXPECT_EQ(memcmp(echo, this->srv_.echo(), 8), 0);
+
+  // Sent again with a new Partial IV and the Echo value
+  const uint8_t piv2[] = {0x41};
+  const uint8_t opt2[] = {0x09, 0x41};
+  const std::vector<uint8_t> inner = inner_with_echo(0x01, this->srv_.echo());
+  ASSERT_TRUE(client_encrypt(this->srv_, piv2, sizeof(piv2), inner.data(), inner.size(), ciphertext, &cipher_len));
+  this->srv_.inject(make_oscore_post("fp/1/g/1", opt2, sizeof(opt2), ciphertext, cipher_len), make_peer());
+
+  ASSERT_GE(this->srv_.last_sent.size(), 2u);
+  EXPECT_EQ(this->srv_.last_sent[1], 0x44u);
+  ASSERT_TRUE(CoapServerNet::parse_coap(this->srv_.last_sent.data(), this->srv_.last_sent.size(), &reply));
+  ASSERT_TRUE(
+      client_decrypt_reply(this->srv_, piv2, sizeof(piv2), reply.payload, reply.payload_len, plain, &plain_len));
+  EXPECT_EQ(plain[0], 0x45);  // 2.05 with the sensor state
+}
+
 TEST_F(OscoreTest, ProtectedGetWithoutObserveRepliesWithOuterChanged) {
   this->srv_.init_resources(2);
   TestSensor s;
@@ -734,6 +920,41 @@ TEST_F(OscoreTest, ProtectedGetWithoutObserveRepliesWithOuterChanged) {
 
   EXPECT_EQ(protected_get_reply_code(this->srv_, false, 0x31), 0x44);  // 2.04
 }
+
+#ifdef USE_LOGGER
+TEST_F(OscoreTest, PlainLogSubscriptionRefused) {
+  this->srv_.init_resources(2);
+  uint16_t idx = 1;
+  const char *path = this->srv_.add_logs_resource(idx);
+
+  this->srv_.inject(make_coap_get(path, 10, 0, 0), make_peer());
+
+  ASSERT_GE(this->srv_.last_sent.size(), 2u);
+  EXPECT_EQ(this->srv_.last_sent[1], 0x81u);  // 4.01
+  EXPECT_EQ(this->srv_.active_observer_count(), 0u);
+}
+
+TEST_F(OscoreTest, ProtectedLogSubscriptionKeepsRequestForNotifications) {
+  this->srv_.init_resources(2);
+  uint16_t idx = 1;
+  const char *path = this->srv_.add_logs_resource(idx);
+  const uint8_t piv[] = {0x32};
+  const uint8_t opt[] = {0x09, 0x32};
+  const uint8_t inner[] = {0x01};  // GET
+  uint8_t ciphertext[256];
+  size_t cipher_len = 0;
+  ASSERT_TRUE(client_encrypt(this->srv_, piv, sizeof(piv), inner, sizeof(inner), ciphertext, &cipher_len));
+
+  this->srv_.inject(make_oscore_observe(path, 0, opt, sizeof(opt), ciphertext, cipher_len), make_peer());
+
+  ASSERT_GE(this->srv_.last_sent.size(), 2u);
+  EXPECT_EQ(this->srv_.last_sent[1], 0x45u);  // 2.05, as it carries Observe
+  NetCoapObserver *obs = this->srv_.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+  ASSERT_EQ(obs->oscore_req_piv_len, 1u);
+  EXPECT_EQ(obs->oscore_req_piv[0], 0x32u);
+}
+#endif
 
 // The outer code of a protected request is always POST, so the button must act on the inner code
 struct ProtectedButton {

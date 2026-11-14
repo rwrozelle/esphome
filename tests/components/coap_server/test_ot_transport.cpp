@@ -20,9 +20,13 @@ class TestableCoapServerOT : public CoapServerOT {
     this->instance_ = openthread::InstanceLock::acquire().get_instance();
     this->resources_.init(4);
     fake_ot::reset();
+#ifdef USE_COAP_OSCORE
+    this->oscore_restore_seq_no_();  // as setup() does; a notification needs a saved sequence number
+#endif
   }
   // The scheduler outlives this object, and the ping timers capture this
   ~TestableCoapServerOT() {
+    App.scheduler.call(millis());  // commands and client announcements deferred to the main loop capture this
     for (auto &client : this->active_clients_) {
       if (client.active)
         this->cancel_ping_client_(&client);
@@ -65,6 +69,16 @@ class TestableCoapServerOT : public CoapServerOT {
     otMessageInfo info{};
     this->handle_button_request(resource, msg, &info);
   }
+  void request_entity(ehCoapResource *resource, otMessage *msg) {
+    otMessageInfo info{};
+    this->handle_entity_request(resource, msg, &info, resource->type);
+  }
+#ifdef USE_LOGGER
+  void request_logs(ehCoapResource *resource, otMessage *msg) {
+    otMessageInfo info{};
+    this->handle_logs_request(resource, msg, &info);
+  }
+#endif
 
   void add_free_observer() {
     auto *obs = new ehCoapObserver{};  // NOLINT(cppcoreguidelines-owning-memory) freed by shrink_observers()
@@ -142,8 +156,11 @@ class TestableCoapServerOT : public CoapServerOT {
   }
   bool setup_oscore() {
     this->set_oscore_material();
+    // As after a request that returned the Echo value; the Echo exchange has its own tests
+    this->oscore_replay_mask_ = 1;
     return this->oscore_derive_keys_();
   }
+  void reset_replay_window() { this->oscore_replay_mask_ = 0; }
   // Key derivation clears the master secret
   bool keys_derived() const { return this->oscore_master_secret_.empty(); }
   // Encrypts a request as a client with Sender ID h'' would, or decrypts the reply to it
@@ -169,11 +186,14 @@ class TestableCoapServerOT : public CoapServerOT {
 #endif
 };
 
-otMessage *make_request(otCoapCode code) {
+otMessage *make_request(otCoapCode code, otCoapType type = OT_COAP_TYPE_NON_CONFIRMABLE) {
   otMessage *msg = otCoapNewMessage(nullptr, nullptr);
-  otCoapMessageInit(msg, OT_COAP_TYPE_NON_CONFIRMABLE, code);
+  otCoapMessageInit(msg, type, code);
   return msg;
 }
+
+// Runs what the OpenThread handlers deferred to the main loop
+void run_main_loop() { App.scheduler.call(millis()); }
 
 std::string make_link_format(int entries) {
   std::string content;
@@ -316,9 +336,92 @@ TEST(CoapServerOTButton, PostPresses) {
   ehCoapResource *res = srv.add_resource(ENTITYTYPE_BUTTON, &btn, false);
 
   srv.request_button(res, make_request(OT_COAP_CODE_POST));
+  EXPECT_EQ(btn.press_count, 0);                // pressed on the main loop, not on the OpenThread task
+  EXPECT_FALSE(fake_ot::inline_send_called());  // a NON request gets no ACK
+
+  run_main_loop();
 
   EXPECT_EQ(btn.press_count, 1);
-  EXPECT_EQ(fake_ot::last_response_code(), OT_COAP_CODE_CHANGED);
+  EXPECT_EQ(fake_ot::last_request_code(), OT_COAP_CODE_CHANGED);  // separate response
+  EXPECT_EQ(fake_ot::last_request_type(), OT_COAP_TYPE_NON_CONFIRMABLE);
+}
+
+// A CON request gets an empty ACK at once, then the reply as its own CON message under the request's token
+TEST(CoapServerOTButton, ConPostAckedThenAnsweredSeparately) {
+  TestableCoapServerOT srv;
+  TestButton btn;
+  btn.configure("btn");
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_BUTTON, &btn, false);
+  otMessage *msg = make_request(OT_COAP_CODE_POST, OT_COAP_TYPE_CONFIRMABLE);
+  const uint8_t token[] = {0xBE, 0xEF};
+  otCoapMessageSetToken(msg, token, sizeof(token));
+
+  srv.request_button(res, msg);
+
+  EXPECT_EQ(fake_ot::last_response_code(), OT_COAP_CODE_EMPTY);
+  EXPECT_EQ(fake_ot::last_request_code(), -1);
+  EXPECT_EQ(btn.press_count, 0);
+
+  run_main_loop();
+
+  EXPECT_EQ(btn.press_count, 1);
+  EXPECT_EQ(fake_ot::last_request_code(), OT_COAP_CODE_CHANGED);
+  EXPECT_EQ(fake_ot::last_request_type(), OT_COAP_TYPE_CONFIRMABLE);
+  EXPECT_EQ(fake_ot::last_request_token(), std::string("\xBE\xEF"));
+}
+
+TEST(CoapServerOTButton, BusyQueueAnswersServiceUnavailable) {
+  TestableCoapServerOT srv;
+  TestButton btn;
+  btn.configure("btn");
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_BUTTON, &btn, false);
+
+  for (int i = 0; i < 4; i++)
+    srv.request_button(res, make_request(OT_COAP_CODE_POST));
+  srv.request_button(res, make_request(OT_COAP_CODE_POST));
+
+  EXPECT_EQ(fake_ot::last_response_code(), OT_COAP_CODE_SERVICE_UNAVAILABLE);
+  run_main_loop();
+  EXPECT_EQ(btn.press_count, 4);
+}
+
+// ---------------------------------------------------------------------------
+// Entity POST
+// ---------------------------------------------------------------------------
+
+TEST(CoapServerOTEntity, SwitchPostRunsOnMainLoopAndRepliesWithState) {
+  TestableCoapServerOT srv;
+  TestSwitch sw;
+  sw.configure("relay");
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_SWITCH, &sw, true);
+  otMessage *msg = make_request(OT_COAP_CODE_POST);
+  const uint8_t on[] = {0xA1, 0x04, 0xF5};  // {4: true}
+  otMessageAppend(msg, on, sizeof(on));
+
+  srv.request_entity(res, msg);
+  EXPECT_FALSE(sw.state);
+
+  run_main_loop();
+
+  EXPECT_TRUE(sw.state);
+  EXPECT_EQ(fake_ot::last_request_code(), OT_COAP_CODE_CHANGED);
+  EXPECT_FALSE(fake_ot::last_request().empty());  // the new state
+}
+
+TEST(CoapServerOTEntity, PostPayloadTooLargeIsRefused) {
+  TestableCoapServerOT srv;
+  TestSwitch sw;
+  sw.configure("relay");
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_SWITCH, &sw, true);
+  otMessage *msg = make_request(OT_COAP_CODE_POST);
+  const uint8_t big[33] = {};
+  otMessageAppend(msg, big, sizeof(big));
+
+  srv.request_entity(res, msg);
+
+  EXPECT_EQ(fake_ot::last_response_code(), OT_COAP_CODE_REQUEST_TOO_LARGE);
+  run_main_loop();
+  EXPECT_EQ(fake_ot::last_request_code(), -1);
 }
 
 TEST(CoapServerOTButton, GetDoesNotPress) {
@@ -346,9 +449,16 @@ int protected_button_request(TestableCoapServerOT &srv, ehCoapResource *res, uin
   otMessage *msg = make_request(OT_COAP_CODE_POST);  // the outer code of a protected request
   otMessageAppend(msg, ciphertext, static_cast<uint16_t>(cipher_len));
   srv.request_button(res, msg);
-  if (fake_ot::last_response_code() != OT_COAP_CODE_CHANGED)
+  run_main_loop();
+  // A press is answered separately from the main loop; a refused method at once
+  std::string reply;
+  if (fake_ot::last_request_code() == OT_COAP_CODE_CHANGED) {
+    reply = fake_ot::last_request();
+  } else if (fake_ot::last_response_code() == OT_COAP_CODE_CHANGED) {
+    reply = fake_ot::last_response();
+  } else {
     return -1;
-  const std::string reply = fake_ot::last_response();
+  }
   uint8_t plain[64];
   size_t plain_len = 0;
   if (!srv.client_crypt(false, piv, sizeof(piv), reinterpret_cast<const uint8_t *>(reply.data()), reply.size(), plain,
@@ -379,6 +489,75 @@ TEST(CoapServerOTButton, ProtectedInnerGetDoesNotPress) {
   res->oscore_exempt = false;
 
   EXPECT_EQ(protected_button_request(srv, res, OT_COAP_CODE_GET), OT_COAP_CODE_METHOD_NOT_ALLOWED);
+  EXPECT_EQ(btn.press_count, 0);
+}
+
+#ifdef USE_LOGGER
+TEST(CoapServerOTLogs, PlainRequestRefusedWithOscore) {
+  TestableCoapServerOT srv;
+  ASSERT_TRUE(srv.setup_oscore());
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_LOG, nullptr, true);
+  res->oscore_exempt = false;
+
+  srv.request_logs(res, make_request(OT_COAP_CODE_GET));
+
+  EXPECT_EQ(fake_ot::last_response_code(), OT_COAP_CODE_UNAUTHORIZED);
+}
+
+TEST(CoapServerOTLogs, ProtectedGetAnsweredProtected) {
+  TestableCoapServerOT srv;
+  ASSERT_TRUE(srv.setup_oscore());
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_LOG, nullptr, true);
+  res->oscore_exempt = false;
+  const uint8_t piv[] = {0x2D};
+  const uint8_t opt[] = {0x09, 0x2D};  // PIV length 1, k flag with an empty KID
+  const uint8_t inner[] = {OT_COAP_CODE_GET};
+  uint8_t ciphertext[64];
+  size_t cipher_len = 0;
+  ASSERT_TRUE(
+      srv.client_crypt(true, piv, sizeof(piv), inner, sizeof(inner), ciphertext, sizeof(ciphertext), &cipher_len));
+  fake_ot::set_request_oscore_option(opt, sizeof(opt));
+  otMessage *msg = make_request(OT_COAP_CODE_POST);  // the outer code of a protected request
+  otMessageAppend(msg, ciphertext, static_cast<uint16_t>(cipher_len));
+
+  srv.request_logs(res, msg);
+
+  ASSERT_EQ(fake_ot::last_response_code(), OT_COAP_CODE_CHANGED);  // no Observe in this request
+  const std::string reply = fake_ot::last_response();
+  uint8_t plain[64];
+  size_t plain_len = 0;
+  ASSERT_TRUE(srv.client_crypt(false, piv, sizeof(piv), reinterpret_cast<const uint8_t *>(reply.data()), reply.size(),
+                               plain, sizeof(plain), &plain_len));
+  ASSERT_EQ(plain_len, 5u);
+  EXPECT_EQ(plain[0], OT_COAP_CODE_CONTENT);
+  EXPECT_EQ(plain[4], 0x80);  // CBOR []
+}
+#endif
+
+// After a reboot the first protected request gets a protected 4.01 with Echo, not a plain 4.01
+TEST(CoapServerOTButton, FirstRequestAfterRebootGetsEchoChallenge) {
+  TestableCoapServerOT srv;
+  ASSERT_TRUE(srv.setup_oscore());
+  srv.reset_replay_window();
+  TestButton btn;
+  btn.configure("btn");
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_BUTTON, &btn, false);
+  res->oscore_exempt = false;
+  const uint8_t piv[] = {0x2E};
+  const uint8_t opt[] = {0x09, 0x2E};
+  const uint8_t inner[] = {OT_COAP_CODE_POST};
+  uint8_t ciphertext[64];
+  size_t cipher_len = 0;
+  ASSERT_TRUE(
+      srv.client_crypt(true, piv, sizeof(piv), inner, sizeof(inner), ciphertext, sizeof(ciphertext), &cipher_len));
+  fake_ot::set_request_oscore_option(opt, sizeof(opt));
+  otMessage *msg = make_request(OT_COAP_CODE_POST);
+  otMessageAppend(msg, ciphertext, static_cast<uint16_t>(cipher_len));
+
+  srv.request_button(res, msg);
+
+  EXPECT_EQ(fake_ot::last_response_code(), OT_COAP_CODE_CHANGED);  // protected; the 4.01 is inside
+  EXPECT_EQ(fake_ot::last_response().size(), 11u + OSCORE_AES_TAG_LEN);
   EXPECT_EQ(btn.press_count, 0);
 }
 #endif
@@ -641,11 +820,29 @@ TEST(CoapServerOTCallbacks, ConnectAndDisconnectReportTheSameAddress) {
   ehCoapClient *client = srv.connect_client(info);
   ASSERT_NE(client, nullptr);
   EXPECT_EQ(srv.get_active_client_count(), 1u);
+  EXPECT_TRUE(connected.empty());  // the automation runs on the main loop
+  run_main_loop();
+  EXPECT_FALSE(connected.empty());
   srv.disconnect_client(client);
 
   EXPECT_FALSE(connected.empty());
   EXPECT_EQ(disconnected, connected);
   EXPECT_EQ(srv.get_active_client_count(), 0u);
+}
+
+TEST(CoapServerOTCallbacks, ClientFreedBeforeAnnouncedReportsNothing) {
+  TestableCoapServerOT srv;
+  int events = 0;
+  srv.add_on_client_connected_callback([&](const std::string &) { events++; });
+  srv.add_on_client_disconnected_callback([&](const std::string &) { events++; });
+  otMessageInfo info{};
+  info.mPeerAddr.mFields.m8[15] = 0x03;
+
+  ehCoapClient *client = srv.connect_client(info);
+  srv.disconnect_client(client);
+  run_main_loop();
+
+  EXPECT_EQ(events, 0);
 }
 
 // ---------------------------------------------------------------------------

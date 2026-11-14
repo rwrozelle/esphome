@@ -367,11 +367,7 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
   OscoreRequestInfo oscore_req_info{};
   if (!this->oscore_unprotect_request_(message, resource, oscore_plain, sizeof(oscore_plain), &oscore_plain_len,
                                        &oscore_req_info)) {
-    response = otCoapNewMessage(instance, nullptr);
-    if (response) {
-      otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_UNAUTHORIZED);
-      otCoapSendResponse(instance, response, message_info);
-    }
+    this->send_oscore_refusal_(nullptr, message, message_info, oscore_req_info);
     return;
   }
   // For protected requests, override msg_offset/msg_len to use plaintext.
@@ -532,52 +528,34 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
     msg_offset = otMessageGetOffset(message);
     msg_len = otMessageGetLength(message) - msg_offset;
 #endif
-    if (msg_len > 0 && msg_len <= COAP_PAYLOAD_MAX_SIZE) {
-      uint8_t msg_buf[COAP_PAYLOAD_MAX_SIZE];
-#ifdef USE_COAP_OSCORE
-      if (oscore_protected)
-        memcpy(msg_buf, oscore_plain + msg_offset, msg_len);
-      else
-        otMessageRead(message, msg_offset, msg_buf, msg_len);
-#else
-      otMessageRead(message, msg_offset, msg_buf, msg_len);
-#endif
-      apply_entity_post(resource->entity, type, resource->action, msg_buf, msg_len);
-    }
-    payload_len = this->cbor_output_(payload_buffer, COAP_PAYLOAD_MAX_SIZE, resource->entity, resource->type);
-
-    if (payload_len == 0) {
+    // The command runs on the main loop, which sends the reply with the new state (B8)
+    uint8_t msg_buf[COMMAND_PAYLOAD_MAX];
+    const uint8_t *post_payload = msg_buf;
+    if (msg_len > sizeof(msg_buf)) {
       SuccessOrExit(
-          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
+          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_REQUEST_TOO_LARGE));
       SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
       goto exit;
     }
 #ifdef USE_COAP_OSCORE
     if (oscore_protected) {
-      uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
-      size_t inner_len = oscore_build_inner_cbor(0x44, payload_buffer, payload_len, inner, sizeof(inner));
-      uint8_t ciphertext[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
-      size_t cipher_len =
-          this->oscore_protect_response_(inner, inner_len, oscore_req_info, false, ciphertext, sizeof(ciphertext));
-      if (cipher_len == 0) {
-        SuccessOrExit(
-            error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
-        SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-        goto exit;
-      }
-      SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
-      SuccessOrExit(error = otCoapMessageAppendOption(response, 9, 0, nullptr));  // OSCORE option, empty
-      SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-      SuccessOrExit(error = otMessageAppend(response, ciphertext, (uint16_t) cipher_len));
-      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
-      goto exit;
+      post_payload = oscore_plain + msg_offset;
+    } else {
+      otMessageRead(message, msg_offset, msg_buf, msg_len);
     }
-#endif  // USE_COAP_OSCORE
-    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
-    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
-    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
-    SuccessOrExit(error = otMessageAppend(response, payload_buffer, (uint16_t) payload_len));
-    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+#else
+    otMessageRead(message, msg_offset, msg_buf, msg_len);
+#endif
+    {
+      PendingCommand cmd{};
+      make_command_(resource, message, message_info, post_payload, msg_len, &cmd);
+#ifdef USE_COAP_OSCORE
+      cmd.oscore_protected = oscore_protected;
+      cmd.oscore_req_info = oscore_req_info;
+#endif
+      this->queue_command_(cmd, message, message_info, response);
+      response = nullptr;  // sent or freed by queue_command_
+    }
   } else {
     ESP_LOGW(TAG, "Method Not Allowed for path=%s effective_code=0x%02x", resource->mUriPath, (int) effective_code);
     SuccessOrExit(
@@ -591,6 +569,125 @@ exit:
       otMessageFree(response);
   }
 }  // handle_entity_request()
+
+bool CoapServerOT::make_command_(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info,
+                                 const uint8_t *payload, size_t payload_len, PendingCommand *cmd) {
+  if (payload_len > sizeof(cmd->payload))
+    return false;
+  cmd->resource = resource;
+  cmd->message_info = *message_info;
+  cmd->confirmable = otCoapMessageGetType(message) == OT_COAP_TYPE_CONFIRMABLE;
+  otCoapMessageReadToken(message, &cmd->token);
+  if (payload_len > 0)
+    memcpy(cmd->payload, payload, payload_len);
+  cmd->payload_len = static_cast<uint8_t>(payload_len);
+  return true;
+}
+
+void CoapServerOT::queue_command_(const PendingCommand &cmd, otMessage *message, const otMessageInfo *message_info,
+                                  otMessage *response) {
+  int slot = -1;
+  {
+    LockGuard lock(this->lock_);
+    for (size_t i = 0; i < this->pending_commands_.size(); i++) {
+      if (this->pending_commands_[i].resource == nullptr) {
+        this->pending_commands_[i] = cmd;
+        slot = static_cast<int>(i);
+        break;
+      }
+    }
+  }
+  otError error = OT_ERROR_NONE;
+  if (slot < 0) {
+    SuccessOrExit(
+        error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_SERVICE_UNAVAILABLE));
+    SuccessOrExit(error = otCoapSendResponse(this->instance_, response, message_info));
+    return;
+  }
+  this->defer([this, slot]() { this->run_command_(static_cast<uint8_t>(slot)); });
+  if (!cmd.confirmable) {
+    otMessageFree(response);  // a NON request gets only the reply
+    return;
+  }
+  // Empty ACK now, so the client stops retransmitting; OpenThread copies the token, which aiocoap ignores here
+  SuccessOrExit(error = otCoapMessageInitResponse(response, message, OT_COAP_TYPE_ACKNOWLEDGMENT, OT_COAP_CODE_EMPTY));
+  SuccessOrExit(error = otCoapSendResponse(this->instance_, response, message_info));
+  return;
+exit:
+  otMessageFree(response);
+}
+
+void CoapServerOT::run_command_(uint8_t slot) {
+  PendingCommand cmd;
+  {
+    LockGuard lock(this->lock_);
+    cmd = this->pending_commands_[slot];
+  }
+  if (cmd.resource == nullptr)
+    return;
+  uint8_t payload[COAP_PAYLOAD_MAX_SIZE];
+  size_t payload_len = 0;
+#ifdef USE_BUTTON
+  if (cmd.resource->type == ENTITYTYPE_BUTTON) {
+    static_cast<button::Button *>(cmd.resource->entity)->press();
+  } else
+#endif
+  {
+    apply_entity_post(cmd.resource->entity, cmd.resource->type, cmd.resource->action, cmd.payload, cmd.payload_len);
+    payload_len = this->cbor_output_(payload, sizeof(payload), cmd.resource->entity, cmd.resource->type);
+  }
+  this->send_command_reply_(cmd, payload, payload_len);
+  LockGuard lock(this->lock_);
+  this->pending_commands_[slot].resource = nullptr;
+}
+
+void CoapServerOT::send_command_reply_(const PendingCommand &cmd, const uint8_t *payload, size_t payload_len) {
+  const bool is_button = cmd.resource->type == ENTITYTYPE_BUTTON;
+  // 2.04 with the new state; a button has no state. 5.00 when the state could not be encoded.
+  const bool ok = is_button || payload_len > 0;
+  openthread::InstanceLock lock = openthread::InstanceLock::acquire();
+  otInstance *instance = lock.get_instance();
+  otError error = OT_ERROR_NONE;
+  otMessage *message = otCoapNewMessage(instance, nullptr);
+  if (message == nullptr) {
+    ESP_LOGW(TAG, "No message buffer for the reply to /%s", cmd.resource->mUriPath);
+    return;
+  }
+  SuccessOrExit(error = coap_message_init(message,
+                                          cmd.confirmable ? OT_COAP_TYPE_CONFIRMABLE : OT_COAP_TYPE_NON_CONFIRMABLE,
+                                          ok ? OT_COAP_CODE_CHANGED : OT_COAP_CODE_INTERNAL_ERROR));
+  SuccessOrExit(error = otCoapMessageWriteToken(message, &cmd.token));
+#ifdef USE_COAP_OSCORE
+  if (ok && cmd.oscore_protected) {
+    uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
+    size_t inner_len = 1;
+    inner[0] = OT_COAP_CODE_CHANGED;
+    if (!is_button)
+      inner_len = oscore_build_inner_cbor(OT_COAP_CODE_CHANGED, payload, payload_len, inner, sizeof(inner));
+    uint8_t ciphertext[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
+    size_t cipher_len =
+        this->oscore_protect_response_(inner, inner_len, cmd.oscore_req_info, false, ciphertext, sizeof(ciphertext));
+    if (cipher_len == 0) {
+      error = OT_ERROR_FAILED;
+      goto exit;
+    }
+    SuccessOrExit(error = otCoapMessageAppendOption(message, 9, 0, nullptr));  // OSCORE option, empty
+    SuccessOrExit(error = otCoapMessageSetPayloadMarker(message));
+    SuccessOrExit(error = otMessageAppend(message, ciphertext, static_cast<uint16_t>(cipher_len)));
+  } else
+#endif
+      if (ok && !is_button) {
+    SuccessOrExit(error = otCoapMessageAppendContentFormatOption(message, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
+    SuccessOrExit(error = otCoapMessageSetPayloadMarker(message));
+    SuccessOrExit(error = otMessageAppend(message, payload, static_cast<uint16_t>(payload_len)));
+  }
+  // A CON reply is retransmitted by OpenThread until the client acknowledges it
+  SuccessOrExit(error = otCoapSendRequest(instance, message, &cmd.message_info, nullptr, nullptr));
+  return;
+exit:
+  ESP_LOGW(TAG, "Reply to /%s not sent: %s", cmd.resource->mUriPath, otThreadErrorToString(error));
+  otMessageFree(message);
+}
 
 // static handler for all entity types except button
 void CoapServerOT::handle_entity_request(void *context, otMessage *message, const otMessageInfo *message_info) {
@@ -626,8 +723,7 @@ void CoapServerOT::handle_button_request(ehCoapResource *resource, otMessage *me
     OscoreRequestInfo oscore_req_info{};
     if (!this->oscore_unprotect_request_(message, resource, oscore_plain, sizeof(oscore_plain), &oscore_plain_len,
                                          &oscore_req_info)) {
-      otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_UNAUTHORIZED);
-      otCoapSendResponse(instance, response, message_info);
+      this->send_oscore_refusal_(response, message, message_info, oscore_req_info);
       return;
     }
     // A protected request's outer code is always POST; its method is the inner code
@@ -635,27 +731,33 @@ void CoapServerOT::handle_button_request(ehCoapResource *resource, otMessage *me
 #else
     const bool post = true;
 #endif
-    if (post)
-      static_cast<button::Button *>(resource->entity)->press();
+    if (post) {
+      // Pressed on the main loop, which then sends the reply (B8)
+      PendingCommand cmd{};
+      make_command_(resource, message, message_info, nullptr, 0, &cmd);
 #ifdef USE_COAP_OSCORE
-    if (oscore_plain_len > 0) {
-      // Inner: 2.04 Changed, or 4.05 Method Not Allowed; no payload for a button
-      uint8_t inner[1] = {static_cast<uint8_t>(post ? OT_COAP_CODE_CHANGED : OT_COAP_CODE_METHOD_NOT_ALLOWED)};
-      uint8_t ciphertext[OSCORE_TAG_LEN + 4];
-      size_t cipher_len =
-          this->oscore_protect_response_(inner, 1, oscore_req_info, false, ciphertext, sizeof(ciphertext));
-      if (cipher_len > 0) {
-        otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED);
-        otCoapMessageAppendOption(response, 9, 0, nullptr);
-        otCoapMessageSetPayloadMarker(response);
-        otMessageAppend(response, ciphertext, (uint16_t) cipher_len);
-        otCoapSendResponse(instance, response, message_info);
-      }
+      cmd.oscore_protected = oscore_plain_len > 0;
+      cmd.oscore_req_info = oscore_req_info;
+#endif
+      this->queue_command_(cmd, message, message_info, response);
+      return;
+    }
+#ifdef USE_COAP_OSCORE
+    // Protected, with an inner code other than POST: 4.05 inside
+    uint8_t inner[1] = {OT_COAP_CODE_METHOD_NOT_ALLOWED};
+    uint8_t ciphertext[OSCORE_TAG_LEN + 4];
+    size_t cipher_len =
+        this->oscore_protect_response_(inner, 1, oscore_req_info, false, ciphertext, sizeof(ciphertext));
+    if (cipher_len == 0) {
+      error = OT_ERROR_FAILED;
       goto exit;
     }
-#endif
     SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
+    SuccessOrExit(error = otCoapMessageAppendOption(response, 9, 0, nullptr));
+    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
+    SuccessOrExit(error = otMessageAppend(response, ciphertext, (uint16_t) cipher_len));
     SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+#endif
   } else {
     SuccessOrExit(
         error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_METHOD_NOT_ALLOWED));
@@ -1065,6 +1167,7 @@ ehCoapClient *CoapServerOT::new_client_(const otMessageInfo &message_info) {
         client.ping_miss_count = 0;
         client.has_non_observer = false;
         client.boot_notified = false;
+        client.announced = false;
         client.slot = i;
         this->active_client_count_++;
         // Observer is created before the client in handle_state_request, so
@@ -1082,13 +1185,25 @@ ehCoapClient *CoapServerOT::new_client_(const otMessageInfo &message_info) {
       }
     }
   }
-  if (result != nullptr) {
-    char addr_str[OT_IP6_ADDRESS_STRING_SIZE];
-    otIp6AddressToString(&result->peer_addr, addr_str, sizeof(addr_str));
-    this->client_connected_callback_(std::string(addr_str));
-    this->ping_client_(result);
-  }
+  // Called from a request handler on the OpenThread task: automations and the scheduler belong on the main loop
+  if (result != nullptr)
+    this->defer([this, result]() { this->announce_client_(result); });
   return result;
+}
+
+void CoapServerOT::announce_client_(ehCoapClient *client) {
+  otIp6Address peer_addr;
+  {
+    LockGuard lock(this->lock_);
+    if (!client->active || client->announced)
+      return;  // freed again, or the slot's new client was announced already
+    client->announced = true;
+    peer_addr = client->peer_addr;
+  }
+  char addr_str[OT_IP6_ADDRESS_STRING_SIZE];
+  otIp6AddressToString(&peer_addr, addr_str, sizeof(addr_str));
+  this->client_connected_callback_(std::string(addr_str));
+  this->ping_client_(client);
 }
 
 void CoapServerOT::ping_client_(ehCoapClient *client) {
@@ -1174,15 +1289,20 @@ void CoapServerOT::touch_client_(const otMessageInfo &message_info) {
 void CoapServerOT::free_client_(ehCoapClient *client) {
   this->cancel_ping_client_(client);
   otIp6Address peer_addr;
+  bool announced;
   {
     LockGuard lock(this->lock_);
     peer_addr = client->peer_addr;
+    announced = client->announced;
     client->active = false;
+    client->announced = false;
     this->active_client_count_--;
   }
-  char addr_str[OT_IP6_ADDRESS_STRING_SIZE];
-  otIp6AddressToString(&peer_addr, addr_str, sizeof(addr_str));
-  this->client_disconnected_callback_(std::string(addr_str));
+  if (announced) {  // a client never reported as connected is not reported as disconnected either
+    char addr_str[OT_IP6_ADDRESS_STRING_SIZE];
+    otIp6AddressToString(&peer_addr, addr_str, sizeof(addr_str));
+    this->client_disconnected_callback_(std::string(addr_str));
+  }
 
   // Free all NON observers for this client in one pass under one lock acquisition.
   // CON observers are left alive — they self-cancel via handle_notification_ack on the
@@ -1302,6 +1422,36 @@ void CoapServerOT::on_entity_update(EntityBase *entity) {
 
 #ifdef USE_COAP_OSCORE
 
+void CoapServerOT::send_oscore_refusal_(otMessage *response, otMessage *message, const otMessageInfo *message_info,
+                                        const OscoreRequestInfo &req_info) {
+  if (response == nullptr)
+    response = otCoapNewMessage(this->instance_, nullptr);
+  if (response == nullptr)
+    return;
+  otError error = OT_ERROR_NONE;
+  if (req_info.echo_required) {
+    uint8_t opt[16];
+    uint8_t opt_len = 0;
+    uint8_t ciphertext[3 + OSCORE_ECHO_LEN + OSCORE_TAG_LEN];
+    size_t cipher_len = this->oscore_protect_echo_challenge_(req_info, ciphertext, sizeof(ciphertext), opt, &opt_len);
+    if (cipher_len > 0) {
+      // The 4.01 is inside; a protected response's outer code is 2.04 (RFC 8613 §4.2)
+      SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CHANGED));
+      SuccessOrExit(error = otCoapMessageAppendOption(response, 9, opt_len, opt));
+      SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
+      SuccessOrExit(error = otMessageAppend(response, ciphertext, static_cast<uint16_t>(cipher_len)));
+      SuccessOrExit(error = otCoapSendResponse(this->instance_, response, message_info));
+      return;
+    }
+  }
+  SuccessOrExit(error =
+                    otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_UNAUTHORIZED));
+  SuccessOrExit(error = otCoapSendResponse(this->instance_, response, message_info));
+  return;
+exit:
+  otMessageFree(response);
+}
+
 bool CoapServerOT::oscore_unprotect_request_(otMessage *message, const ehCoapResource *resource, uint8_t *plaintext,
                                              size_t plaintext_buf_len, size_t *plaintext_len,
                                              OscoreRequestInfo *req_info) {
@@ -1351,17 +1501,31 @@ void CoapServerOT::handle_logs_request(void *context, otMessage *message, const 
   otError error = OT_ERROR_NONE;
   otMessage *response = nullptr;
 
+  self->touch_client_(*message_info);
+
+#ifdef USE_COAP_OSCORE
+  uint8_t oscore_plain[256];
+  size_t oscore_plain_len = 0;
+  OscoreRequestInfo oscore_req_info{};
+  if (!self->oscore_unprotect_request_(message, resource, oscore_plain, sizeof(oscore_plain), &oscore_plain_len,
+                                       &oscore_req_info)) {
+    self->send_oscore_refusal_(nullptr, message, message_info, oscore_req_info);
+    return;
+  }
+  const bool oscore_protected = (oscore_plain_len > 0);
+  if ((oscore_protected ? static_cast<otCoapCode>(oscore_plain[0]) : otCoapMessageGetCode(message)) != OT_COAP_CODE_GET)
+    return;
+#else
   if (otCoapMessageGetCode(message) != OT_COAP_CODE_GET)
     return;
-
-  self->touch_client_(*message_info);
+#endif
 
   response = otCoapNewMessage(instance, nullptr);
   if (response == nullptr)
     return;
 
   uint8_t observe = self->observe_(message);
-  bool registered = false;
+  ehCoapObserver *observer = nullptr;
 
   if (observe == 0) {
     bool is_con = (otCoapMessageGetType(message) == OT_COAP_TYPE_CONFIRMABLE);
@@ -1384,7 +1548,7 @@ void CoapServerOT::handle_logs_request(void *context, otMessage *message, const 
     }
     otCoapToken token;
     SuccessOrExit(error = otCoapMessageReadToken(message, &token));
-    registered = self->new_observer_(resource, *message_info, token, otCoapMessageGetType(message)) != nullptr;
+    observer = self->new_observer_(resource, *message_info, token, otCoapMessageGetType(message));
   } else if (observe == 1) {
     ehCoapObserver *obs = self->get_observer_(message, message_info);
     if (obs != nullptr) {
@@ -1394,9 +1558,42 @@ void CoapServerOT::handle_logs_request(void *context, otMessage *message, const 
   }
 
   static const uint8_t kEmptyArray[] = {0x80};  // CBOR [] — no current state to return
+#ifdef USE_COAP_OSCORE
+  if (oscore_protected) {
+    if (observer != nullptr) {
+      // Notifications use the registering request in their AAD
+      LockGuard lock(self->lock_);
+      memcpy(observer->oscore_req_piv, oscore_req_info.piv, oscore_req_info.piv_len);
+      observer->oscore_req_piv_len = oscore_req_info.piv_len;
+      memcpy(observer->oscore_req_kid, oscore_req_info.kid, oscore_req_info.kid_len);
+      observer->oscore_req_kid_len = oscore_req_info.kid_len;
+    }
+    uint8_t inner[sizeof(kEmptyArray) + 4];
+    size_t inner_len = oscore_build_inner_cbor(0x45, kEmptyArray, sizeof(kEmptyArray), inner, sizeof(inner));
+    uint8_t ciphertext[sizeof(inner) + OSCORE_TAG_LEN];
+    size_t cipher_len =
+        self->oscore_protect_response_(inner, inner_len, oscore_req_info, false, ciphertext, sizeof(ciphertext));
+    if (cipher_len == 0) {
+      SuccessOrExit(
+          error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_INTERNAL_ERROR));
+      SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+      goto exit;
+    }
+    // Outer code 2.05 when the reply carries Observe, otherwise 2.04 (RFC 8613 §4.1.3.5)
+    SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message),
+                                                    observer != nullptr ? OT_COAP_CODE_CONTENT : OT_COAP_CODE_CHANGED));
+    if (observer != nullptr)
+      SuccessOrExit(error = otCoapMessageAppendObserveOption(response, observer->observe_serial++));
+    SuccessOrExit(error = otCoapMessageAppendOption(response, 9, 0, nullptr));  // OSCORE option, empty
+    SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
+    SuccessOrExit(error = otMessageAppend(response, ciphertext, (uint16_t) cipher_len));
+    SuccessOrExit(error = otCoapSendResponse(instance, response, message_info));
+    goto exit;
+  }
+#endif  // USE_COAP_OSCORE
   SuccessOrExit(error = otCoapMessageInitResponse(response, message, response_type(message), OT_COAP_CODE_CONTENT));
-  if (registered)
-    SuccessOrExit(error = otCoapMessageAppendObserveOption(response, 0));
+  if (observer != nullptr)
+    SuccessOrExit(error = otCoapMessageAppendObserveOption(response, observer->observe_serial++));
   SuccessOrExit(error = otCoapMessageAppendContentFormatOption(response, OT_COAP_OPTION_CONTENT_FORMAT_CBOR));
   SuccessOrExit(error = otCoapMessageSetPayloadMarker(response));
   SuccessOrExit(error = otMessageAppend(response, kEmptyArray, sizeof(kEmptyArray)));

@@ -201,6 +201,8 @@ class CoapServerNet : public CoapServer {
 #ifdef USE_COAP_OSCORE
   bool oscore_unprotect_request_(const CoapPacket &pkt, const NetCoapResource *resource, uint8_t *plaintext,
                                  size_t plaintext_buf_len, size_t *plaintext_len, OscoreRequestInfo *req_info);
+  // Answers a refused request: a protected 4.01 with Echo when unprotect asked for one, a plain 4.01 otherwise
+  void send_oscore_refusal_(const CoapPacket &pkt, const sockaddr_storage &peer, const OscoreRequestInfo &req_info);
 #endif
 
   std::unique_ptr<socket::Socket> sock_;

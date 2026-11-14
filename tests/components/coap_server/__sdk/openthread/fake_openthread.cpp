@@ -57,6 +57,12 @@ uint16_t g_matched_option = 0;
 otCoapResponseHandler g_request_handler = nullptr;
 void *g_request_ctx = nullptr;
 int g_requests_sent = 0;
+// Last message sent with otCoapSendRequest
+uint8_t g_last_request[2048];
+uint16_t g_last_request_len = 0;
+int g_last_request_code = -1;
+int g_last_request_type = -1;
+std::string g_last_request_token;
 bool g_fail_next_new_message = false;
 bool g_fail_next_send = false;
 bool g_fail_coap_start = false;
@@ -67,6 +73,10 @@ uint32_t g_poll_period = 5000;
 namespace esphome::coap_server::testing::fake_ot {
 
 void reset() {
+  g_last_request_len = 0;
+  g_last_request_code = -1;
+  g_last_request_type = -1;
+  g_last_request_token.clear();
   g_last_response_len = 0;
   g_last_response_code = 0;
   g_inline_send_called = false;
@@ -107,6 +117,11 @@ void set_request_oscore_option(const uint8_t *value, uint8_t len) {
   g_oscore_option.mLength = len;
   g_has_oscore_option = true;
 }
+std::string last_request() { return std::string(reinterpret_cast<const char *>(g_last_request), g_last_request_len); }
+int last_request_code() { return g_last_request_code; }
+int last_request_type() { return g_last_request_type; }
+std::string last_request_token() { return g_last_request_token; }
+
 int requests_sent() { return g_requests_sent; }
 bool has_pending_request() { return g_request_handler != nullptr; }
 void *pending_request_ctx() { return g_request_ctx; }
@@ -327,13 +342,20 @@ otError otCoapSendResponseBlockWise(otInstance * /*instance*/, otMessage *msg, c
 }
 
 // Keeps the response handler of the last request with one, as OpenThread does until the request is answered
-otError otCoapSendRequest(otInstance * /*instance*/, otMessage * /*msg*/, const otMessageInfo * /*info*/,
+otError otCoapSendRequest(otInstance * /*instance*/, otMessage *msg, const otMessageInfo * /*info*/,
                           otCoapResponseHandler handler, void *ctx) {
   if (g_fail_next_send) {
     g_fail_next_send = false;
     return OT_ERROR_NO_BUFS;
   }
   g_requests_sent++;
+  const FakeMessage *m = as_fake(msg);
+  g_last_request_len = m->len;
+  if (m->len > 0)
+    memcpy(g_last_request, m->buf, m->len);
+  g_last_request_code = static_cast<int>(m->code);
+  g_last_request_type = static_cast<int>(m->type);
+  g_last_request_token.assign(reinterpret_cast<const char *>(m->token), m->token_len);
   if (handler != nullptr) {
     g_request_handler = handler;
     g_request_ctx = ctx;

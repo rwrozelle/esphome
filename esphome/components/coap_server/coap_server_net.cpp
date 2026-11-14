@@ -551,8 +551,7 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
   OscoreRequestInfo oscore_req_info{};
   if (!this->oscore_unprotect_request_(pkt, resource, this->oscore_plain_, sizeof(this->oscore_plain_),
                                        &oscore_plain_len, &oscore_req_info)) {
-    this->builder_.begin(resp_type(pkt.type), 0x81, pkt.message_id, pkt.token, pkt.token_len);
-    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
+    this->send_oscore_refusal_(pkt, peer, oscore_req_info);
     return;
   }
   const bool oscore_protected = (oscore_plain_len > 0);
@@ -717,8 +716,7 @@ void CoapServerNet::handle_button_request_(const CoapPacket &pkt, const sockaddr
   OscoreRequestInfo oscore_req_info{};
   if (!this->oscore_unprotect_request_(pkt, resource, this->oscore_plain_, sizeof(this->oscore_plain_),
                                        &oscore_plain_len, &oscore_req_info)) {
-    this->builder_.begin(resp_type(pkt.type), 0x81, pkt.message_id, pkt.token, pkt.token_len);
-    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
+    this->send_oscore_refusal_(pkt, peer, oscore_req_info);
     return;
   }
   // A protected request's outer code is always POST; its method is the inner code
@@ -1150,6 +1148,27 @@ void CoapServerNet::free_observer_(NetCoapObserver *observer) {
 // ---------------------------------------------------------------------------
 
 #ifdef USE_COAP_OSCORE
+void CoapServerNet::send_oscore_refusal_(const CoapPacket &pkt, const sockaddr_storage &peer,
+                                         const OscoreRequestInfo &req_info) {
+  if (req_info.echo_required) {
+    uint8_t opt[16];
+    uint8_t opt_len = 0;
+    size_t cipher_len = this->oscore_protect_echo_challenge_(req_info, this->oscore_cipher_,
+                                                             sizeof(this->oscore_cipher_), opt, &opt_len);
+    if (cipher_len > 0) {
+      // The 4.01 is inside; a protected response's outer code is 2.04 (RFC 8613 §4.2)
+      this->builder_.begin(resp_type(pkt.type), 0x44, pkt.message_id, pkt.token, pkt.token_len);
+      this->builder_.option(9, opt, opt_len);
+      this->builder_.payload_marker();
+      this->builder_.append(this->oscore_cipher_, cipher_len);
+      this->send_response(this->builder_.buf, this->builder_.pos, &peer);
+      return;
+    }
+  }
+  this->builder_.begin(resp_type(pkt.type), 0x81, pkt.message_id, pkt.token, pkt.token_len);  // 4.01
+  this->send_response(this->builder_.buf, this->builder_.pos, &peer);
+}
+
 bool CoapServerNet::oscore_unprotect_request_(const CoapPacket &pkt, const NetCoapResource *resource,
                                               uint8_t *plaintext, size_t plaintext_buf_len, size_t *plaintext_len,
                                               OscoreRequestInfo *req_info) {
@@ -1192,9 +1211,22 @@ void CoapServerNet::flush_logs_() {
 
 void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_storage &peer) {
   this->touch_client_(peer);
+#ifdef USE_COAP_OSCORE
+  size_t oscore_plain_len = 0;
+  OscoreRequestInfo oscore_req_info{};
+  if (!this->oscore_unprotect_request_(pkt, this->logs_resource_, this->oscore_plain_, sizeof(this->oscore_plain_),
+                                       &oscore_plain_len, &oscore_req_info)) {
+    this->send_oscore_refusal_(pkt, peer, oscore_req_info);
+    return;
+  }
+  const bool oscore_protected = (oscore_plain_len > 0);
+  if ((oscore_protected ? this->oscore_plain_[0] : pkt.code) != 0x01)
+    return;  // GET only
+#else
   if (pkt.code != 0x01)
     return;  // GET only
-  bool registered = false;
+#endif
+  NetCoapObserver *observer = nullptr;
   if (pkt.observe_present && pkt.observe == 0) {
     bool is_con = (pkt.type == 0);
     if (this->get_subscription_confirm() != is_con) {
@@ -1205,16 +1237,46 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_s
     NetCoapObserver *stale = this->get_observer_(pkt.token, pkt.token_len, peer);
     if (stale != nullptr)
       this->free_observer_(stale);
-    registered = this->new_observer_(this->logs_resource_, peer, pkt.token, pkt.token_len, is_con) != nullptr;
+    observer = this->new_observer_(this->logs_resource_, peer, pkt.token, pkt.token_len, is_con);
   } else if (pkt.observe_present && pkt.observe == 1) {
     NetCoapObserver *obs = this->get_observer_(pkt.token, pkt.token_len, peer);
     if (obs != nullptr)
       this->free_observer_(obs);
   }
   static const uint8_t EMPTY_CBOR_ARRAY[] = {0x80};
+#ifdef USE_COAP_OSCORE
+  if (oscore_protected) {
+    if (observer != nullptr) {
+      // Notifications use the registering request in their AAD
+      memcpy(observer->oscore_req_piv, oscore_req_info.piv, oscore_req_info.piv_len);
+      observer->oscore_req_piv_len = oscore_req_info.piv_len;
+      memcpy(observer->oscore_req_kid, oscore_req_info.kid, oscore_req_info.kid_len);
+      observer->oscore_req_kid_len = oscore_req_info.kid_len;
+    }
+    size_t inner_len = oscore_build_inner_cbor(0x45, EMPTY_CBOR_ARRAY, sizeof(EMPTY_CBOR_ARRAY), this->oscore_inner_,
+                                               sizeof(this->oscore_inner_));
+    size_t cipher_len = this->oscore_protect_response_(this->oscore_inner_, inner_len, oscore_req_info, false,
+                                                       this->oscore_cipher_, sizeof(this->oscore_cipher_));
+    if (cipher_len == 0) {
+      this->builder_.begin(resp_type(pkt.type), 0xA0, pkt.message_id, pkt.token, pkt.token_len);  // 5.00
+      this->send_response(this->builder_.buf, this->builder_.pos, &peer);
+      return;
+    }
+    // Outer code 2.05 when the reply carries Observe, otherwise 2.04 (RFC 8613 §4.1.3.5)
+    this->builder_.begin(resp_type(pkt.type), observer != nullptr ? 0x45 : 0x44, pkt.message_id, pkt.token,
+                         pkt.token_len);
+    if (observer != nullptr)
+      this->builder_.option_uint(6, observer->observe_serial++);
+    this->builder_.option_empty(9);
+    this->builder_.payload_marker();
+    this->builder_.append(this->oscore_cipher_, cipher_len);
+    this->send_response(this->builder_.buf, this->builder_.pos, &peer);
+    return;
+  }
+#endif
   this->builder_.begin(resp_type(pkt.type), 0x45, pkt.message_id, pkt.token, pkt.token_len);
-  if (registered)
-    this->builder_.option_uint(6, 0);
+  if (observer != nullptr)
+    this->builder_.option_uint(6, observer->observe_serial++);
   uint8_t cf = 60;
   this->builder_.option(12, &cf, 1);
   this->builder_.payload_marker();

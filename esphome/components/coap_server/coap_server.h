@@ -206,6 +206,8 @@ class CoapServer : public Component {
     uint8_t piv_len{0};
     uint8_t kid[8];
     uint8_t kid_len{0};
+    // Set when unprotect refused a genuine request that must first prove it is fresh (RFC 8613 Appendix B.1.2)
+    bool echo_required{false};
   };
 #endif  // USE_COAP_OSCORE
 
@@ -328,7 +330,11 @@ class CoapServer : public Component {
   uint32_t oscore_sender_seq_no_{0};
   uint32_t oscore_seq_threshold_{0};
   uint32_t oscore_replay_top_{0};
-  uint64_t oscore_replay_mask_{0};  // bit i = (top - i) was received; 64-entry window
+  uint64_t oscore_replay_mask_{0};  // bit i = (top - i) was received; 64-entry window; 0 until started
+  // Echo value of this boot (RFC 9175); the replay window starts from the first request that returns it
+  static constexpr uint16_t COAP_OPTION_ECHO = 252;
+  static constexpr size_t OSCORE_ECHO_LEN = 8;
+  uint8_t oscore_echo_[OSCORE_ECHO_LEN]{};
 
   // Sender ID retained after key derivation for notification OSCORE option
   uint8_t oscore_sender_id_buf_[8]{};
@@ -341,7 +347,8 @@ class CoapServer : public Component {
   // Continues from the stored sequence number and stores the next block
   void oscore_restore_seq_no_();
   void oscore_save_seq_no_();
-  void oscore_increment_seq_no_();
+  // Saves a new threshold when the current number reached the saved one; false if that save fails
+  bool oscore_seq_no_saved_();
 
   // Encrypts inner_payload (code + options + payload) into out_buf.
   // For responses: req_info carries the request's PIV/KID; is_notification uses sender_seq_no_.
@@ -366,6 +373,13 @@ class CoapServer : public Component {
   // Finds the payload of a decrypted inner message [code][options][0xFF][payload] by walking the options
   // (RFC 7252 §3.1). Sets *offset to the payload start, or to len when there is none. False if malformed.
   static bool oscore_inner_payload_offset(const uint8_t *plain, size_t len, size_t *offset);
+  // Walks the inner options as above and also finds option `number`: *value is nullptr when it is absent
+  static bool oscore_walk_inner(const uint8_t *plain, size_t len, uint16_t number, size_t *offset,
+                                const uint8_t **value, size_t *value_len);
+  // Protects a 4.01 carrying this boot's Echo value, with the device's own Partial IV, as the request may be a
+  // replay (RFC 8613 Appendix B.1.2). Writes the OSCORE option into opt (>= 16 bytes). Returns 0 on failure.
+  size_t oscore_protect_echo_challenge_(const OscoreRequestInfo &req_info, uint8_t *out, size_t out_len, uint8_t *opt,
+                                        uint8_t *opt_len);
 
   // Returns 0 when it does not fit in out_size.
   static size_t oscore_build_inner_cbor(uint8_t code, const uint8_t *payload, size_t payload_len, uint8_t *out,

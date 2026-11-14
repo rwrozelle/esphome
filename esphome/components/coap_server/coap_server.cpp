@@ -1,6 +1,7 @@
 #include "coap_server.h"
 #include "esphome/core/application.h"
 #include "esphome/core/device.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "cbor.h"
 #ifdef USE_LOGGER
@@ -376,8 +377,10 @@ bool CoapServer::oscore_derive_keys_() {
     oscore_wipe(this->oscore_sender_key_, sizeof(this->oscore_sender_key_));
     oscore_wipe(this->oscore_recipient_key_, sizeof(this->oscore_recipient_key_));
     oscore_wipe(this->oscore_common_iv_, sizeof(this->oscore_common_iv_));
+    return false;
   }
-  return ok;
+  // A new value each boot, so an Echo seen before the reboot cannot start the replay window
+  return random_bytes(this->oscore_echo_, sizeof(this->oscore_echo_));
 }
 
 bool CoapServer::oscore_derive_keys_from_material_() {
@@ -510,11 +513,14 @@ size_t CoapServer::oscore_protect_response_(const uint8_t *inner, size_t inner_l
       this->status_set_error(LOG_STR("OSCORE sender sequence number exhausted"));
       return 0;
     }
+    // A number not covered by a saved threshold would be used again after a reboot
+    if (!this->oscore_seq_no_saved_())
+      return 0;
     piv_len = oscore_encode_piv(this->oscore_sender_seq_no_, piv);
     // Notification nonce uses server's sender_id as KID
     memcpy(kid, this->oscore_sender_id_buf_, this->oscore_sender_id_len_);
     kid_len = this->oscore_sender_id_len_;
-    this->oscore_increment_seq_no_();
+    this->oscore_sender_seq_no_++;
   } else {
     // Simple response: reuse the request's PIV and KID for nonce (RFC 8613 §8.3)
     memcpy(piv, req_info.piv, req_info.piv_len);
@@ -590,14 +596,10 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
   uint32_t seq = 0;
   for (uint8_t i = 0; i < piv_len; i++)
     seq = (seq << 8) | req_info->piv[i];
-  if (this->oscore_replay_mask_ != 0) {
-    if (seq <= this->oscore_replay_top_) {
-      uint32_t offset = this->oscore_replay_top_ - seq;
-      if (offset >= 64 || (this->oscore_replay_mask_ & (1ULL << offset))) {
-        ESP_LOGW(TAG, "OSCORE: replayed sequence number %" PRIu32, seq);
-        return false;
-      }
-    }
+  bool replayed = false;
+  if (this->oscore_replay_mask_ != 0 && seq <= this->oscore_replay_top_) {
+    uint32_t offset = this->oscore_replay_top_ - seq;
+    replayed = offset >= 64 || (this->oscore_replay_mask_ & (1ULL << offset));
   }
 
   uint8_t nonce[OSCORE_IV_LEN];
@@ -614,11 +616,31 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
                               plaintext, plaintext_buf_len, &out_len))
     return false;
 
-  if (this->oscore_replay_mask_ == 0 || seq > this->oscore_replay_top_) {
-    if (this->oscore_replay_mask_ != 0) {
-      uint32_t shift = seq - this->oscore_replay_top_;
-      this->oscore_replay_mask_ = (shift < 64) ? (this->oscore_replay_mask_ << shift) : 0;
+  // Only a genuine request gets an Echo challenge, so others cannot make the device use up sequence numbers
+  if (replayed) {
+    ESP_LOGW(TAG, "OSCORE: replayed sequence number %" PRIu32, seq);
+    req_info->echo_required = true;
+    return false;
+  }
+  if (this->oscore_replay_mask_ == 0) {
+    // After a reboot the window is empty: only a request returning this boot's Echo value can start it
+    size_t payload_offset = 0;
+    const uint8_t *echo = nullptr;
+    size_t echo_len = 0;
+    if (!oscore_walk_inner(plaintext, out_len, COAP_OPTION_ECHO, &payload_offset, &echo, &echo_len) ||
+        echo == nullptr || echo_len != sizeof(this->oscore_echo_) ||
+        memcmp(echo, this->oscore_echo_, sizeof(this->oscore_echo_)) != 0) {
+      ESP_LOGD(TAG, "OSCORE: first request since boot, asking for Echo");
+      req_info->echo_required = true;
+      return false;
     }
+
+    // First request since boot: every older number counts as seen, so requests recorded before the reboot fail
+    this->oscore_replay_top_ = seq;
+    this->oscore_replay_mask_ = ~0ULL;
+  } else if (seq > this->oscore_replay_top_) {
+    uint32_t shift = seq - this->oscore_replay_top_;
+    this->oscore_replay_mask_ = (shift < 64) ? (this->oscore_replay_mask_ << shift) : 0;
     this->oscore_replay_top_ = seq;
     this->oscore_replay_mask_ |= 1ULL;
   } else {
@@ -632,6 +654,17 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
 
 // static
 bool CoapServer::oscore_inner_payload_offset(const uint8_t *plain, size_t len, size_t *offset) {
+  const uint8_t *value = nullptr;
+  size_t value_len = 0;
+  return oscore_walk_inner(plain, len, 0, offset, &value, &value_len);
+}
+
+// static
+bool CoapServer::oscore_walk_inner(const uint8_t *plain, size_t len, uint16_t number, size_t *offset,
+                                   const uint8_t **value, size_t *value_len_out) {
+  *value = nullptr;
+  *value_len_out = 0;
+  uint32_t option = 0;
   size_t pos = 1;  // after the code
   while (pos < len) {
     const uint8_t header = plain[pos++];
@@ -639,15 +672,22 @@ bool CoapServer::oscore_inner_payload_offset(const uint8_t *plain, size_t len, s
       *offset = pos;
       return true;
     }
-    const uint8_t delta = header >> 4;
+    uint32_t delta = header >> 4;
     size_t value_len = header & 0x0F;
     if (delta == 15 || value_len == 15)
       return false;
     if (delta == 13) {
+      if (pos + 1 > len)
+        return false;
+      delta = plain[pos] + 13;
       pos += 1;
     } else if (delta == 14) {
+      if (pos + 2 > len)
+        return false;
+      delta = encode_uint16(plain[pos], plain[pos + 1]) + 269;
       pos += 2;
     }
+    option += delta;
     if (value_len == 13) {
       if (pos + 1 > len)
         return false;
@@ -661,10 +701,28 @@ bool CoapServer::oscore_inner_payload_offset(const uint8_t *plain, size_t len, s
     }
     if (pos > len || value_len > len - pos)
       return false;
+    if (number != 0 && option == number) {
+      *value = plain + pos;
+      *value_len_out = value_len;
+    }
     pos += value_len;
   }
   *offset = len;
   return true;
+}
+
+size_t CoapServer::oscore_protect_echo_challenge_(const OscoreRequestInfo &req_info, uint8_t *out, size_t out_len,
+                                                  uint8_t *opt, uint8_t *opt_len) {
+  // 4.01, then Echo (252): delta 13 with extended delta 252 - 13, and its length
+  uint8_t inner[3 + OSCORE_ECHO_LEN] = {0x81, static_cast<uint8_t>(0xD0 | OSCORE_ECHO_LEN),
+                                        static_cast<uint8_t>(COAP_OPTION_ECHO - 13)};
+  memcpy(inner + 3, this->oscore_echo_, OSCORE_ECHO_LEN);
+  // Protected like a notification: the device's own Partial IV, never the request's nonce
+  size_t cipher_len = this->oscore_protect_response_(inner, sizeof(inner), req_info, true, out, out_len);
+  if (cipher_len == 0)
+    return 0;
+  *opt_len = this->oscore_build_notify_option_(opt);
+  return cipher_len;
 }
 
 // static
@@ -693,17 +751,20 @@ void CoapServer::oscore_save_seq_no_() {
     ESP_LOGW(TAG, "OSCORE: sender sequence number approaching exhaustion (%" PRIu32 " / %" PRIu32 ")",
              this->oscore_sender_seq_no_, (uint32_t) UINT32_MAX);
   }
-  const uint32_t threshold = this->oscore_sender_seq_no_ + OSCORE_SEQ_INTERVAL;
+  const uint32_t threshold = (this->oscore_sender_seq_no_ > UINT32_MAX - OSCORE_SEQ_INTERVAL)
+                                 ? UINT32_MAX
+                                 : this->oscore_sender_seq_no_ + OSCORE_SEQ_INTERVAL;
   // Keeping the old threshold retries the save on the next notification
   const bool saved = this->oscore_seq_pref_.save(&threshold) && this->oscore_seq_pref_.sync();
   if (this->status_comm_result(saved, LOG_STR("OSCORE sequence number save failed")))
     this->oscore_seq_threshold_ = threshold;
 }
 
-void CoapServer::oscore_increment_seq_no_() {
-  this->oscore_sender_seq_no_++;
-  if (this->oscore_sender_seq_no_ >= this->oscore_seq_threshold_)
-    this->oscore_save_seq_no_();
+bool CoapServer::oscore_seq_no_saved_() {
+  if (this->oscore_sender_seq_no_ < this->oscore_seq_threshold_)
+    return true;
+  this->oscore_save_seq_no_();
+  return this->oscore_sender_seq_no_ < this->oscore_seq_threshold_;
 }
 
 #endif  // USE_COAP_OSCORE

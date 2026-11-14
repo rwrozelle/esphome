@@ -148,6 +148,11 @@ class ScopedPrefDir {
 // Captures outbound packets instead of using a socket, and exposes the protected members the tests drive
 class TestableCoapServerNet : public CoapServerNet {
  public:
+#ifdef USE_COAP_OSCORE
+  TestableCoapServerNet() {
+    this->oscore_restore_seq_no_();  // as setup() does; a notification needs a saved sequence number
+  }
+#endif
   // The scheduler outlives this object, and the ping timers capture this
   ~TestableCoapServerNet() {
     for (auto &client : this->active_clients_) {
@@ -179,6 +184,15 @@ class TestableCoapServerNet : public CoapServerNet {
     for (size_t i = first; i < this->resources_.size(); i++)
       this->resources_[i].oscore_exempt = oscore_exempt;
   }
+
+#ifdef USE_LOGGER
+  // Adds the log stream resource as setup() does; returns its path
+  const char *add_logs_resource(uint16_t &senml_index) {
+    this->add_net_resource_(ENTITYTYPE_LOG, nullptr, true, senml_index);
+    this->logs_resource_ = &this->resources_[this->resources_.size() - 1];
+    return this->logs_resource_->path;
+  }
+#endif
 
   // Builds the .well-known/core cache from the App entity lists, as setup() does
   void populate_link_format_cache() {

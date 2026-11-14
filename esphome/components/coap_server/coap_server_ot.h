@@ -22,6 +22,7 @@ struct ehCoapResource : otCoapResource, CoapResourceBase {
 struct ehCoapClient : CoapClientBase {
   otIp6Address peer_addr;
   uint16_t peer_port{0};
+  bool announced{false};  // on_client_connected has run on the main loop
 };
 
 struct ehCoapObserver : CoapObserverBase {
@@ -68,6 +69,8 @@ class CoapServerOT : public CoapServer {
   void handle_observer_(ehCoapObserver *observer, ehCoapResource *expected_resource, const uint8_t *payload,
                         size_t payload_len);
   ehCoapClient *new_client_(const otMessageInfo &message_info);
+  // Main loop: runs on_client_connected and starts the pings for a client added on the OpenThread task
+  void announce_client_(ehCoapClient *client);
   ehCoapClient *find_client_(const otIp6Address &addr);
   void touch_client_(const otMessageInfo &message_info);
   void free_client_(ehCoapClient *client);
@@ -80,6 +83,34 @@ class CoapServerOT : public CoapServer {
   void free_observer_(ehCoapObserver *observer);
   // Called with lock_ held once OpenThread no longer holds observer as a CON context
   void finish_con_(ehCoapObserver *observer);
+
+  // A command (entity POST or button press) taken on the OpenThread task and run on the main loop, which then sends
+  // the reply as a separate response under the request's token (RFC 7252 §5.2.2)
+  static constexpr size_t COMMAND_PAYLOAD_MAX = 32;
+  static constexpr size_t MAX_PENDING_COMMANDS = 4;
+  struct PendingCommand {
+    ehCoapResource *resource{nullptr};  // nullptr while the slot is free
+    otMessageInfo message_info;
+    otCoapToken token;
+    bool confirmable{false};
+    uint8_t payload_len{0};
+    uint8_t payload[COMMAND_PAYLOAD_MAX];
+#ifdef USE_COAP_OSCORE
+    bool oscore_protected{false};
+    OscoreRequestInfo oscore_req_info;
+#endif
+  };
+  // OpenThread task: fills cmd from the request, payload included; false when the payload does not fit
+  static bool make_command_(ehCoapResource *resource, otMessage *message, const otMessageInfo *message_info,
+                            const uint8_t *payload, size_t payload_len, PendingCommand *cmd);
+  // OpenThread task: stores cmd, acknowledges a CON request with an empty ACK and hands the command to the main
+  // loop, or answers 5.03 when every slot is busy. Sends or frees response.
+  void queue_command_(const PendingCommand &cmd, otMessage *message, const otMessageInfo *message_info,
+                      otMessage *response);
+  // Main loop: runs the command in slot and sends its reply
+  void run_command_(uint8_t slot);
+  void send_command_reply_(const PendingCommand &cmd, const uint8_t *payload, size_t payload_len);
+  std::array<PendingCommand, MAX_PENDING_COMMANDS> pending_commands_{};  // guarded by lock_
 
 #ifdef USE_LOGGER
   void flush_logs_();
@@ -128,11 +159,15 @@ class CoapServerOT : public CoapServer {
   mutable Mutex lock_;
 
 #ifdef USE_COAP_OSCORE
-  // Returns false and sends 4.01 if the request must be OSCORE-protected but isn't.
+  // Returns false when the request must be OSCORE-protected and is not, or fails to decrypt or the replay check.
   // On success fills plaintext/plaintext_len (inner CoAP bytes) and req_info.
   // If resource is oscore_exempt, plaintext is left empty and returns true immediately.
   bool oscore_unprotect_request_(otMessage *message, const ehCoapResource *resource, uint8_t *plaintext,
                                  size_t plaintext_buf_len, size_t *plaintext_len, OscoreRequestInfo *req_info);
+  // Answers a refused request: a protected 4.01 with Echo when unprotect asked for one, a plain 4.01 otherwise.
+  // Uses response when it is not nullptr, and frees it if sending fails.
+  void send_oscore_refusal_(otMessage *response, otMessage *message, const otMessageInfo *message_info,
+                            const OscoreRequestInfo &req_info);
 #endif  // USE_COAP_OSCORE
 };
 
