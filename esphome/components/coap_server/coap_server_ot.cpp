@@ -638,12 +638,17 @@ void CoapServerOT::handle_button_request(ehCoapResource *resource, otMessage *me
       otCoapSendResponse(instance, response, message_info);
       return;
     }
+    // A protected request's outer code is always POST; its method is the inner code
+    const bool post = oscore_plain_len == 0 || oscore_plain[0] == OT_COAP_CODE_POST;
+#else
+    const bool post = true;
 #endif
-    static_cast<button::Button *>(resource->entity)->press();
+    if (post)
+      static_cast<button::Button *>(resource->entity)->press();
 #ifdef USE_COAP_OSCORE
     if (oscore_plain_len > 0) {
-      // Inner: [2.04 Changed] (no payload for button)
-      uint8_t inner[1] = {0x44};
+      // Inner: 2.04 Changed, or 4.05 Method Not Allowed; no payload for a button
+      uint8_t inner[1] = {static_cast<uint8_t>(post ? OT_COAP_CODE_CHANGED : OT_COAP_CODE_METHOD_NOT_ALLOWED)};
       uint8_t ciphertext[OSCORE_TAG_LEN + 4];
       size_t cipher_len =
           this->oscore_protect_response_(inner, 1, oscore_req_info, false, ciphertext, sizeof(ciphertext));

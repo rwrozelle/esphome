@@ -123,6 +123,33 @@ class TestableCoapServerOT : public CoapServerOT {
   ehCoapClient *connect_client(const otMessageInfo &info) { return this->new_client_(info); }
   void disconnect_client(ehCoapClient *client) { this->free_client_(client); }
 
+#ifdef USE_COAP_OSCORE
+  // Sender ID h'01' and an empty Recipient ID, as in the network transport's OSCORE tests
+  bool setup_oscore() {
+    static const uint8_t SECRET[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    this->set_oscore_master_secret({SECRET, SECRET + sizeof(SECRET)});
+    this->set_oscore_master_salt({});
+    this->set_oscore_sender_id({0x01});
+    this->set_oscore_recipient_id({});
+    return this->oscore_derive_keys_();
+  }
+  // Encrypts a request as a client with Sender ID h'' would, or decrypts the reply to it
+  bool client_crypt(bool encrypt, const uint8_t *piv, uint8_t piv_len, const uint8_t *in, size_t in_len, uint8_t *out,
+                    size_t out_size, size_t *out_len) {
+    static const uint8_t NO_BYTES[1] = {};
+    uint8_t nonce[OSCORE_IV_LEN];
+    oscore_build_nonce(piv, piv_len, NO_BYTES, 0, this->oscore_common_iv_, nonce);
+    uint8_t aad[80];
+    size_t aad_len = oscore_build_aad(NO_BYTES, 0, piv, piv_len, aad, sizeof(aad));
+    if (aad_len == 0)
+      return false;
+    if (encrypt)
+      return oscore_aes_ccm_encrypt(this->oscore_recipient_key_, nonce, aad, aad_len, in, in_len, out, out_size,
+                                    out_len);
+    return oscore_aes_ccm_decrypt(this->oscore_sender_key_, nonce, aad, aad_len, in, in_len, out, out_size, out_len);
+  }
+#endif
+
  protected:
 #ifdef USE_COAP_OSCORE
   ScopedPrefDir pref_dir_;
@@ -292,6 +319,56 @@ TEST(CoapServerOTButton, GetDoesNotPress) {
   EXPECT_EQ(btn.press_count, 0);
   EXPECT_EQ(fake_ot::last_response_code(), OT_COAP_CODE_METHOD_NOT_ALLOWED);
 }
+
+#ifdef USE_COAP_OSCORE
+// Sends a protected button request whose inner message is just inner_code; returns the reply's inner code
+int protected_button_request(TestableCoapServerOT &srv, ehCoapResource *res, uint8_t inner_code) {
+  const uint8_t piv[] = {0x2C};
+  const uint8_t opt[] = {0x09, 0x2C};  // PIV length 1, k flag with an empty KID
+  uint8_t ciphertext[64];
+  size_t cipher_len = 0;
+  if (!srv.client_crypt(true, piv, sizeof(piv), &inner_code, 1, ciphertext, sizeof(ciphertext), &cipher_len))
+    return -1;
+  fake_ot::set_request_oscore_option(opt, sizeof(opt));
+  otMessage *msg = make_request(OT_COAP_CODE_POST);  // the outer code of a protected request
+  otMessageAppend(msg, ciphertext, static_cast<uint16_t>(cipher_len));
+  srv.request_button(res, msg);
+  if (fake_ot::last_response_code() != OT_COAP_CODE_CHANGED)
+    return -1;
+  const std::string reply = fake_ot::last_response();
+  uint8_t plain[64];
+  size_t plain_len = 0;
+  if (!srv.client_crypt(false, piv, sizeof(piv), reinterpret_cast<const uint8_t *>(reply.data()), reply.size(), plain,
+                        sizeof(plain), &plain_len) ||
+      plain_len < 1)
+    return -1;
+  return plain[0];
+}
+
+TEST(CoapServerOTButton, ProtectedPostPresses) {
+  TestableCoapServerOT srv;
+  ASSERT_TRUE(srv.setup_oscore());
+  TestButton btn;
+  btn.configure("btn");
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_BUTTON, &btn, false);
+  res->oscore_exempt = false;
+
+  EXPECT_EQ(protected_button_request(srv, res, OT_COAP_CODE_POST), OT_COAP_CODE_CHANGED);
+  EXPECT_EQ(btn.press_count, 1);
+}
+
+TEST(CoapServerOTButton, ProtectedInnerGetDoesNotPress) {
+  TestableCoapServerOT srv;
+  ASSERT_TRUE(srv.setup_oscore());
+  TestButton btn;
+  btn.configure("btn");
+  ehCoapResource *res = srv.add_resource(ENTITYTYPE_BUTTON, &btn, false);
+  res->oscore_exempt = false;
+
+  EXPECT_EQ(protected_button_request(srv, res, OT_COAP_CODE_GET), OT_COAP_CODE_METHOD_NOT_ALLOWED);
+  EXPECT_EQ(btn.press_count, 0);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // shrink_observers

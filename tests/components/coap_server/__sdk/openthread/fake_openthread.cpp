@@ -49,6 +49,11 @@ bool g_response_block2_more = false;
 int g_response_block2_szx = 0;
 int g_request_block2_szx = -1;
 otCoapOption g_block2_option{OT_COAP_OPTION_BLOCK2, 1};
+// OSCORE option (9) of the next request, set with fake_ot::set_request_oscore_option()
+uint8_t g_oscore_value[32]{};
+otCoapOption g_oscore_option{9, 0};
+bool g_has_oscore_option = false;
+uint16_t g_matched_option = 0;
 otCoapResponseHandler g_request_handler = nullptr;
 void *g_request_ctx = nullptr;
 int g_requests_sent = 0;
@@ -70,6 +75,8 @@ void reset() {
   g_response_block2_more = false;
   g_response_block2_szx = 0;
   g_request_block2_szx = -1;
+  g_has_oscore_option = false;
+  g_matched_option = 0;
   g_request_handler = nullptr;
   g_request_ctx = nullptr;
   g_requests_sent = 0;
@@ -89,6 +96,13 @@ uint32_t response_block2_num() { return g_response_block2_num; }
 bool response_block2_more() { return g_response_block2_more; }
 int response_block2_szx() { return g_response_block2_szx; }
 void set_request_block2(int szx) { g_request_block2_szx = szx; }
+void set_request_oscore_option(const uint8_t *value, uint8_t len) {
+  if (len > sizeof(g_oscore_value))
+    len = sizeof(g_oscore_value);
+  memcpy(g_oscore_value, value, len);
+  g_oscore_option.mLength = len;
+  g_has_oscore_option = true;
+}
 int requests_sent() { return g_requests_sent; }
 bool has_pending_request() { return g_request_handler != nullptr; }
 void *pending_request_ctx() { return g_request_ctx; }
@@ -238,15 +252,19 @@ bool otCoapMessageAreTokensEqual(const otCoapToken *a, const otCoapToken *b) {
 }
 #endif
 
-// Only a Block2 option set with fake_ot::set_request_block2() is ever found
+// Only a Block2 option set with fake_ot::set_request_block2() or an OSCORE option set with
+// fake_ot::set_request_oscore_option() is ever found
 otError otCoapOptionIteratorInit(otCoapOptionIterator *it, const otMessage * /*msg*/) {
   memset(it, 0, sizeof(*it));
   return OT_ERROR_NONE;
 }
 
 const otCoapOption *otCoapOptionIteratorGetFirstOptionMatching(otCoapOptionIterator * /*it*/, uint16_t num) {
+  g_matched_option = num;
   if (num == OT_COAP_OPTION_BLOCK2 && g_request_block2_szx >= 0)
     return &g_block2_option;
+  if (num == 9 && g_has_oscore_option)
+    return &g_oscore_option;
   return nullptr;
 }
 
@@ -260,7 +278,11 @@ otError otCoapOptionIteratorGetOptionUintValue(otCoapOptionIterator * /*it*/, ui
   return OT_ERROR_NONE;
 }
 
-otError otCoapOptionIteratorGetOptionValue(otCoapOptionIterator * /*it*/, void * /*val*/) { return OT_ERROR_NONE; }
+otError otCoapOptionIteratorGetOptionValue(otCoapOptionIterator * /*it*/, void *val) {
+  if (g_matched_option == 9 && g_has_oscore_option)
+    memcpy(val, g_oscore_value, g_oscore_option.mLength);
+  return OT_ERROR_NONE;
+}
 
 otError otCoapSendResponse(otInstance * /*instance*/, otMessage *msg, const otMessageInfo * /*info*/) {
   FakeMessage *m = as_fake(msg);

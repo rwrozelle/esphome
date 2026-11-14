@@ -524,6 +524,54 @@ TEST_F(OscoreTest, ProtectedPostIsAppliedAndAnsweredEncrypted) {
             std::vector<uint8_t>(state, state + sizeof(state)));
 }
 
+// The outer code of a protected request is always POST, so the button must act on the inner code
+struct ProtectedButton {
+  TestButton btn;
+  const uint8_t piv[1] = {0x2B};
+  const uint8_t opt[2] = {0x09, 0x2B};  // PIV length 1, k flag with an empty KID
+
+  // Sends a protected request whose inner message is just the code; returns the decrypted reply's inner code
+  int send(OscoreServer &srv, uint8_t inner_code) {
+    uint8_t ciphertext[256];
+    size_t cipher_len = 0;
+    if (!client_encrypt(srv, piv, sizeof(piv), &inner_code, 1, ciphertext, &cipher_len))
+      return -1;
+    srv.inject(make_oscore_post("fp/1/g/1", opt, sizeof(opt), ciphertext, cipher_len), make_peer());
+    if (srv.last_sent.size() < 2 || srv.last_sent[1] != 0x44)
+      return -1;
+    std::string reply = payload_of(srv.last_sent);
+    uint8_t plain[256];
+    size_t plain_len = 0;
+    if (!client_decrypt_reply(srv, piv, sizeof(piv), reinterpret_cast<const uint8_t *>(reply.data()), reply.size(),
+                              plain, &plain_len) ||
+        plain_len < 1)
+      return -1;
+    return plain[0];
+  }
+};
+
+TEST_F(OscoreTest, ProtectedButtonPostPresses) {
+  this->srv_.init_resources(2);
+  ProtectedButton b;
+  b.btn.configure("btn");
+  uint16_t idx = 1;
+  this->srv_.add_resource(ENTITYTYPE_BUTTON, &b.btn, false, idx, false);
+
+  EXPECT_EQ(b.send(this->srv_, 0x02), 0x44);  // inner POST, answered 2.04
+  EXPECT_EQ(b.btn.press_count, 1);
+}
+
+TEST_F(OscoreTest, ProtectedButtonInnerGetDoesNotPress) {
+  this->srv_.init_resources(2);
+  ProtectedButton b;
+  b.btn.configure("btn");
+  uint16_t idx = 1;
+  this->srv_.add_resource(ENTITYTYPE_BUTTON, &b.btn, false, idx, false);
+
+  EXPECT_EQ(b.send(this->srv_, 0x01), 0x85);  // inner GET, answered 4.05
+  EXPECT_EQ(b.btn.press_count, 0);
+}
+
 }  // namespace
 }  // namespace esphome::coap_server::testing
 

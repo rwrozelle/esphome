@@ -24,6 +24,8 @@ int response_block2_szx();
 
 // Makes the next request carry Block2(NUM=0, SZX=szx); -1 for no Block2 option
 void set_request_block2(int szx);
+// Makes requests carry an OSCORE option (9) with this value, until reset()
+void set_request_oscore_option(const uint8_t *value, uint8_t len);
 
 // Requests sent with otCoapSendRequest (notifications, pings)
 int requests_sent();

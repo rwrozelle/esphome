@@ -721,11 +721,16 @@ void CoapServerNet::handle_button_request_(const CoapPacket &pkt, const sockaddr
     send_response(this->builder_.buf, this->builder_.pos, &peer);
     return;
   }
+  // A protected request's outer code is always POST; its method is the inner code
+  const bool post = oscore_plain_len == 0 || this->oscore_plain_[0] == 0x02;
+#else
+  const bool post = true;
 #endif
-  static_cast<button::Button *>(resource->entity)->press();
+  if (post)
+    static_cast<button::Button *>(resource->entity)->press();
 #ifdef USE_COAP_OSCORE
   if (oscore_plain_len > 0) {
-    uint8_t inner[1] = {0x44};
+    uint8_t inner[1] = {static_cast<uint8_t>(post ? 0x44 : 0x85)};  // 2.04 Changed or 4.05 Method Not Allowed
     uint8_t cipher[OSCORE_TAG_LEN + 4];
     size_t cipher_len = oscore_protect_response_(inner, 1, oscore_req_info, false, cipher, sizeof(cipher));
     if (cipher_len > 0) {
