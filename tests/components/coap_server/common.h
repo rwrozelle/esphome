@@ -222,6 +222,11 @@ class TestableCoapServerNet : public CoapServerNet {
   void trigger_notify(NetCoapResource *resource, const uint8_t *payload, size_t len) {
     this->notify_observers_(resource, payload, len);
   }
+  void check_con_timeouts(uint32_t now) { this->check_con_timeouts_(now); }
+  void set_last_con_check(uint32_t ms) { this->last_con_check_ms_ = ms; }
+#ifdef USE_COAP_OSCORE
+  void set_sender_seq(uint32_t seq) { this->oscore_sender_seq_no_ = seq; }
+#endif
 
   std::vector<uint8_t> last_sent;
 

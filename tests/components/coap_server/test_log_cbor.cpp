@@ -74,6 +74,7 @@ class LogServer : public TestableCoapServerNet {
 
   void subscribe() { this->inject(make_coap_get(this->logs_resource_->path, 1, 0), make_peer()); }
   const char *logs_path() const { return this->logs_resource_->path; }
+  NetCoapResource *logs_resource() { return this->logs_resource_; }
   void unsubscribe() { this->inject(make_coap_get(this->logs_resource_->path, 2, 1), make_peer()); }
   void log(uint8_t level, const char *tag, const char *message) { this->on_log(level, tag, message, strlen(message)); }
 
@@ -81,6 +82,7 @@ class LogServer : public TestableCoapServerNet {
   size_t buffer_pos() const { return this->log_buf_pos_; }
   bool has_log_data() const { return this->log_buf_has_data_; }
   size_t take(uint8_t *out) { return this->take_log_payload_(out); }
+  size_t copy(uint8_t *out) { return this->copy_log_payload_(out); }
   static constexpr size_t BUF_SIZE = LOG_BUF_SIZE;
 };
 
@@ -105,6 +107,71 @@ TEST(LogCbor, SubscribeAtCapAnsweredWithoutObserve) {
   EXPECT_EQ(srv.last_sent[1], 0x45u);
   EXPECT_NE(srv.last_sent[5] >> 4, 6);  // first option is not Observe
   EXPECT_EQ(srv.active_observer_count(), USE_COAP_SERVER_MAX_CLIENTS);
+}
+
+TEST(LogCbor, CopyLeavesBufferInPlace) {
+  LogServer srv;
+  srv.subscribe();
+  srv.log(3, "tag", "kept");
+  const size_t pos_before = srv.buffer_pos();
+
+  uint8_t out[LogServer::BUF_SIZE];
+  size_t len = srv.copy(out);
+
+  ASSERT_EQ(len, pos_before + 1);
+  EXPECT_EQ(out[len - 1], 0xFFu);
+  auto entries = parse_log_buffer(out, len);
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].message, "kept");
+  EXPECT_TRUE(srv.has_log_data());
+  EXPECT_EQ(srv.buffer_pos(), pos_before);
+}
+
+TEST(LogCbor, CopyOfEmptyBufferIsEmptyArray) {
+  LogServer srv;
+  uint8_t out[LogServer::BUF_SIZE];
+  size_t len = srv.copy(out);
+
+  ASSERT_EQ(len, 2u);
+  EXPECT_EQ(out[0], 0x9Fu);
+  EXPECT_EQ(out[1], 0xFFu);
+}
+
+// The payload is encrypted when OSCORE is built in, so only the effects outside it are checked
+TEST(LogCbor, ConResendDoesNotTakeBufferedLines) {
+  LogServer srv;
+  srv.set_subscription_confirm(true);
+  srv.inject(make_coap_get(srv.logs_path(), 1, 0, 0), make_peer());  // CON subscribe
+  NetCoapObserver *obs = srv.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+  const uint8_t first[] = {0x9F, 0xFF};
+  srv.trigger_notify(srv.logs_resource(), first, sizeof(first));
+  ASSERT_TRUE(obs->con_pending);
+  srv.log(3, "tag", "after");
+  srv.last_sent.clear();
+
+  srv.check_con_timeouts(obs->con_sent_ms + obs->con_timeout_ms);
+
+  ASSERT_FALSE(srv.last_sent.empty());
+  EXPECT_EQ(srv.last_sent[0] & 0x30, 0x00u);  // CON
+  EXPECT_EQ(obs->con_retransmits, 1u);
+  EXPECT_TRUE(srv.has_log_data());  // still there for the next flush
+}
+
+// A full log buffer used to overrun the OSCORE buffers it is encrypted through
+TEST(LogCbor, FullBatchNotifiedThroughOscoreBuffers) {
+  LogServer srv;
+  srv.subscribe();
+  for (int i = 0; i < 20; i++)
+    srv.log(3, "tag", std::string(150, 'm').c_str());
+  uint8_t out[LogServer::BUF_SIZE];
+  const size_t len = srv.take(out);
+  ASSERT_GT(len, 0u);
+  srv.last_sent.clear();
+
+  srv.trigger_notify(srv.logs_resource(), out, len);
+
+  EXPECT_FALSE(srv.last_sent.empty());
 }
 
 TEST(LogCbor, NoObserverSkipsEntry) {
@@ -218,8 +285,14 @@ TEST(LogCbor, LongMessageKeepsLaterEntriesReadable) {
   srv.log(3, "tag", "after");
 
   auto entries = srv.buffered();
-  ASSERT_EQ(entries.size(), 2u);
-  EXPECT_EQ(entries[1].message, "after");
+  if (LogServer::BUF_SIZE > 320) {
+    ASSERT_EQ(entries.size(), 2u);
+    EXPECT_EQ(entries[1].message, "after");
+  } else {
+    // With OSCORE the log buffer is 256 bytes and the cut entry fills it, so "after" is dropped
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(message.compare(0, entries[0].message.size(), entries[0].message), 0);
+  }
 }
 
 TEST(LogCbor, FullBufferDropsNewEntries) {

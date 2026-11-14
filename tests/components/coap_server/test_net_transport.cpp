@@ -432,6 +432,193 @@ TEST(CoapServerNetConObserve, DuplicateAckKeepsObserver) {
   EXPECT_EQ(srv.active_observer_count(), 1u);
 }
 
+// ---------------------------------------------------------------------------
+// CON retransmission (RFC 7252 §4.2): resent with the current state, then the observer is freed
+// ---------------------------------------------------------------------------
+
+TEST(CoapServerNetConRetransmit, FirstTimeoutIsTwoToThreeSeconds) {
+  TestableCoapServerNet srv;
+  TestSensor s;
+  NetCoapResource *res = setup_con_observer(srv, s, make_peer());
+  srv.trigger_notify(res, NOTIFY_PAYLOAD, sizeof(NOTIFY_PAYLOAD));
+  NetCoapObserver *obs = srv.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+
+  EXPECT_GE(obs->con_timeout_ms, 2000u);
+  EXPECT_LE(obs->con_timeout_ms, 3000u);
+  EXPECT_EQ(obs->con_retransmits, 0u);
+}
+
+TEST(CoapServerNetConRetransmit, ResentWithCurrentStateAfterTimeout) {
+  TestableCoapServerNet srv;
+  TestSensor s;
+  NetCoapResource *res = setup_con_observer(srv, s, make_peer());
+  srv.trigger_notify(res, NOTIFY_PAYLOAD, sizeof(NOTIFY_PAYLOAD));
+  NetCoapObserver *obs = srv.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+  const uint16_t first_id = message_id(srv.last_sent);
+  const uint32_t sent = obs->con_sent_ms;
+  const uint32_t timeout = obs->con_timeout_ms;
+
+  srv.last_sent.clear();
+  srv.check_con_timeouts(sent + timeout - 1);
+  EXPECT_TRUE(srv.last_sent.empty());
+
+  srv.check_con_timeouts(sent + timeout);
+  ASSERT_FALSE(srv.last_sent.empty());
+  EXPECT_EQ(srv.last_sent[0] & 0x30, 0x00u);  // CON
+  EXPECT_NE(message_id(srv.last_sent), first_id);
+  EXPECT_EQ(obs->con_msg_id, message_id(srv.last_sent));
+  EXPECT_EQ(obs->con_retransmits, 1u);
+  EXPECT_EQ(obs->con_timeout_ms, 2 * timeout);
+}
+
+TEST(CoapServerNetConRetransmit, AckToResendStopsRetransmission) {
+  TestableCoapServerNet srv;
+  TestSensor s;
+  NetCoapResource *res = setup_con_observer(srv, s, make_peer());
+  srv.trigger_notify(res, NOTIFY_PAYLOAD, sizeof(NOTIFY_PAYLOAD));
+  NetCoapObserver *obs = srv.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+  srv.check_con_timeouts(obs->con_sent_ms + obs->con_timeout_ms);
+
+  srv.inject(make_coap_ack(message_id(srv.last_sent)), make_peer());
+  EXPECT_FALSE(obs->con_pending);
+
+  srv.last_sent.clear();
+  srv.check_con_timeouts(obs->con_sent_ms + 10 * obs->con_timeout_ms);
+  EXPECT_TRUE(srv.last_sent.empty());
+  EXPECT_EQ(srv.active_observer_count(), 1u);
+}
+
+TEST(CoapServerNetConRetransmit, ObserverFreedAfterLastRetransmitTimesOut) {
+  TestableCoapServerNet srv;
+  TestSensor s;
+  NetCoapResource *res = setup_con_observer(srv, s, make_peer());
+  srv.trigger_notify(res, NOTIFY_PAYLOAD, sizeof(NOTIFY_PAYLOAD));
+  NetCoapObserver *obs = srv.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+
+  int resends = 0;
+  while (srv.active_observer_count() == 1 && resends < 10) {
+    srv.last_sent.clear();
+    srv.check_con_timeouts(obs->con_sent_ms + obs->con_timeout_ms);
+    if (!srv.last_sent.empty())
+      resends++;
+  }
+
+  EXPECT_EQ(resends, 4);
+  EXPECT_EQ(srv.active_observer_count(), 0u);
+}
+
+TEST(CoapServerNetConRetransmit, LoopChecksTimeouts) {
+  TestableCoapServerNet srv;
+  TestSensor s;
+  NetCoapResource *res = setup_con_observer(srv, s, make_peer());
+  srv.trigger_notify(res, NOTIFY_PAYLOAD, sizeof(NOTIFY_PAYLOAD));
+  NetCoapObserver *obs = srv.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+  const uint32_t now = App.get_loop_component_start_time();
+  obs->con_sent_ms = now - obs->con_timeout_ms;
+  srv.set_last_con_check(now - 250);
+
+  srv.loop();
+
+  EXPECT_EQ(obs->con_retransmits, 1u);
+}
+
+TEST(CoapServerNetConRetransmit, LoopSkipsCheckWithin250ms) {
+  TestableCoapServerNet srv;
+  TestSensor s;
+  NetCoapResource *res = setup_con_observer(srv, s, make_peer());
+  srv.trigger_notify(res, NOTIFY_PAYLOAD, sizeof(NOTIFY_PAYLOAD));
+  NetCoapObserver *obs = srv.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+  const uint32_t now = App.get_loop_component_start_time();
+  obs->con_sent_ms = now - obs->con_timeout_ms;
+  srv.set_last_con_check(now - 249);
+
+  srv.loop();
+
+  EXPECT_EQ(obs->con_retransmits, 0u);
+}
+
+TEST(CoapServerNetConRetransmit, LateAckForReplacedMessageConfirms) {
+  TestableCoapServerNet srv;
+  TestSensor s;
+  NetCoapResource *res = setup_con_observer(srv, s, make_peer());
+  srv.trigger_notify(res, NOTIFY_PAYLOAD, sizeof(NOTIFY_PAYLOAD));
+  NetCoapObserver *obs = srv.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+  const uint16_t first_id = message_id(srv.last_sent);
+  srv.check_con_timeouts(obs->con_sent_ms + obs->con_timeout_ms);
+  ASSERT_NE(obs->con_msg_id, first_id);
+
+  srv.inject(make_coap_ack(first_id), make_peer());
+
+  EXPECT_FALSE(obs->con_pending);
+}
+
+TEST(CoapServerNetConRetransmit, AckOlderThanReplacedMessageIgnored) {
+  TestableCoapServerNet srv;
+  TestSensor s;
+  NetCoapResource *res = setup_con_observer(srv, s, make_peer());
+  srv.trigger_notify(res, NOTIFY_PAYLOAD, sizeof(NOTIFY_PAYLOAD));
+  NetCoapObserver *obs = srv.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+  const uint16_t first_id = message_id(srv.last_sent);
+  srv.check_con_timeouts(obs->con_sent_ms + obs->con_timeout_ms);
+  srv.check_con_timeouts(obs->con_sent_ms + obs->con_timeout_ms);
+  ASSERT_EQ(obs->con_retransmits, 2u);
+
+  srv.inject(make_coap_ack(first_id), make_peer());
+
+  EXPECT_TRUE(obs->con_pending);
+}
+
+TEST(CoapServerNetConRetransmit, ResendSkippedWhenStateCannotBeEncoded) {
+  TestableCoapServerNet srv;
+  srv.init_resources(2);
+  srv.set_subscription_confirm(true);
+  TestTextSensor ts;
+  ts.configure("ts");
+  ts.state = "short";
+  uint16_t idx = 1;
+  srv.add_resource(ENTITYTYPE_TEXT_SENSOR, &ts, true, idx);
+  srv.inject(make_coap_get("fp/1/g/1", 10, 0, 0), make_peer());
+  srv.trigger_notify(srv.first_observable_resource(), NOTIFY_PAYLOAD, sizeof(NOTIFY_PAYLOAD));
+  NetCoapObserver *obs = srv.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+  ASSERT_TRUE(obs->con_pending);
+  ts.state = std::string(400, 'x');  // larger than the CBOR buffer
+  const uint32_t due = obs->con_sent_ms + obs->con_timeout_ms;
+  srv.last_sent.clear();
+
+  srv.check_con_timeouts(due);
+
+  EXPECT_TRUE(srv.last_sent.empty());
+  EXPECT_TRUE(obs->con_pending);
+  EXPECT_EQ(obs->con_sent_ms, due);  // waits out this attempt
+  EXPECT_EQ(obs->con_retransmits, 1u);
+}
+
+#ifdef USE_COAP_OSCORE
+TEST(CoapServerNetConRetransmit, NotificationNotSentWhenEncryptionFails) {
+  TestableCoapServerNet srv;
+  TestSensor s;
+  NetCoapResource *res = setup_con_observer(srv, s, make_peer());
+  NetCoapObserver *obs = srv.first_active_observer();
+  ASSERT_NE(obs, nullptr);
+  srv.set_sender_seq(UINT32_MAX);  // exhausted, so encryption fails
+  srv.last_sent.clear();
+
+  srv.trigger_notify(res, NOTIFY_PAYLOAD, sizeof(NOTIFY_PAYLOAD));
+
+  EXPECT_TRUE(srv.last_sent.empty());
+  EXPECT_FALSE(obs->con_pending);
+}
+#endif
+
 TEST(CoapServerNetConObserve, NonObserverUnaffectedByAck) {
   TestableCoapServerNet srv;
   srv.init_resources(4);

@@ -29,7 +29,12 @@ struct NetCoapObserver : CoapObserverBase {
   uint8_t token[8]{};
   uint8_t token_len{0};
   bool is_con{false};
-  uint16_t con_msg_id{0};  // msg_id of the last CON notification sent
+  uint16_t con_msg_id{0};       // msg_id of the last CON notification sent
+  uint16_t con_prev_msg_id{0};  // msg_id of the one it replaced, if it was a resend
+  // Retransmission of an unanswered CON notification (RFC 7252 §4.2)
+  uint8_t con_retransmits{0};
+  uint32_t con_sent_ms{0};
+  uint32_t con_timeout_ms{0};
 };
 
 // CoAP response builder — fits an IPv6 minimum-MTU datagram (1280 bytes).
@@ -174,6 +179,10 @@ class CoapServerNet : public CoapServer {
 
   void handle_con_response_(const CoapPacket &pkt, const sockaddr_storage &peer);
   void notify_observers_(NetCoapResource *resource, const uint8_t *payload, size_t payload_len);
+  void send_notification_(NetCoapObserver *obs, const uint8_t *payload, size_t payload_len, bool con, uint32_t now);
+  // Resends unanswered CON notifications and frees observers that never answer
+  void check_con_timeouts_(uint32_t now);
+  void resend_con_(NetCoapObserver *obs, uint32_t now);
   void add_net_resource_(EntityType type, EntityBase *entity, bool observable, uint16_t &senml_index);
   NetCoapResource *find_resource_(const char *path);
 
@@ -200,6 +209,7 @@ class CoapServerNet : public CoapServer {
   std::array<NetCoapClient, USE_COAP_SERVER_MAX_CLIENTS> active_clients_{};
   NetCoapObserver *active_observers_{nullptr};
   NetCoapObserver *free_observers_{nullptr};
+  uint32_t last_con_check_ms_{0};
 
   // Moved off the stack to avoid loopTask overflow.
   // recv_buf_: recvfrom staging buffer (1280 B = IPv6 min MTU).

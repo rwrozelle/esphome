@@ -486,6 +486,8 @@ size_t CoapServer::oscore_build_aad(const uint8_t *kid, uint8_t kid_len, const u
 // Returns 0 on failure. For notifications, advances sender_seq_no_.
 size_t CoapServer::oscore_protect_response_(const uint8_t *inner, size_t inner_len, const OscoreRequestInfo &req_info,
                                             bool is_notification, uint8_t *out_buf, size_t out_buf_len) {
+  if (inner_len == 0)
+    return 0;  // oscore_build_inner_cbor() found the payload too large
   uint8_t piv[5];
   uint8_t piv_len = 0;
   uint8_t kid[8];
@@ -613,7 +615,10 @@ bool CoapServer::oscore_unprotect_core_(const uint8_t *opt_val, uint8_t opt_len,
 }
 
 // static
-size_t CoapServer::oscore_build_inner_cbor(uint8_t code, const uint8_t *payload, size_t payload_len, uint8_t *out) {
+size_t CoapServer::oscore_build_inner_cbor(uint8_t code, const uint8_t *payload, size_t payload_len, uint8_t *out,
+                                           size_t out_size) {
+  if (out_size < 4 || payload_len > out_size - 4)
+    return 0;
   out[0] = code;
   out[1] = 0xC1;  // Content-Format option: delta=12, len=1
   out[2] = 60;    // application/cbor
@@ -658,7 +663,9 @@ void CoapServer::log_callback(void *self, uint8_t level, const char *tag, const 
 }
 
 void CoapServer::log_append_entry_(uint8_t level, const char *tag, const char *message, size_t message_len) {
-  uint8_t entry_buf[320];
+  // An entry also fits an empty log buffer, after its array start and before the closing break byte
+  static constexpr size_t ENTRY_BUF_SIZE = std::min<size_t>(320, LOG_BUF_SIZE - 2);
+  uint8_t entry_buf[ENTRY_BUF_SIZE];
   CborEncoder enc, arr;
   cbor_encoder_init(&enc, entry_buf, sizeof(entry_buf), 0);
   if (cbor_encoder_create_array(&enc, &arr, 4) != CBOR_NO_ERROR || cbor_encode_uint(&arr, millis()) != CBOR_NO_ERROR ||
@@ -697,6 +704,13 @@ size_t CoapServer::take_log_payload_(uint8_t *out) {
   this->log_buf_pos_ = 1;
   this->log_buf_has_data_ = false;
   return len;
+}
+
+size_t CoapServer::copy_log_payload_(uint8_t *out) {
+  LockGuard guard(this->log_mutex_);
+  memcpy(out, this->log_buf_, this->log_buf_pos_);
+  out[this->log_buf_pos_] = 0xFF;  // CBOR break byte — closes the indefinite array
+  return this->log_buf_pos_ + 1;
 }
 
 #endif  // USE_LOGGER

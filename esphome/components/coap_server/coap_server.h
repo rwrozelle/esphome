@@ -24,7 +24,8 @@ static constexpr size_t COAP_PAYLOAD_MAX_SIZE = 256;
 static constexpr size_t COAP_PAYLOAD_SMALL_SIZE = 64;
 // CBOR buffer sized for the largest entity type actually in the build.
 // text_sensor values can fill the full 256 bytes; all other entity types fit in 64.
-#ifdef USE_TEXT_SENSOR
+// With OSCORE, a log batch is encrypted through buffers of this size, so it needs the full 256 bytes too.
+#if defined(USE_TEXT_SENSOR) || (defined(USE_COAP_OSCORE) && defined(USE_LOGGER))
 static constexpr size_t COAP_CBOR_BUF_SIZE = COAP_PAYLOAD_MAX_SIZE;
 #else
 static constexpr size_t COAP_CBOR_BUF_SIZE = COAP_PAYLOAD_SMALL_SIZE;
@@ -284,8 +285,15 @@ class CoapServer : public Component {
   void log_append_entry_(uint8_t level, const char *tag, const char *message, size_t message_len);
   // Closes the indefinite CBOR array, copies it out, and resets the buffer.  Returns 0 if no data.
   size_t take_log_payload_(uint8_t *out);
+  // Copies the buffered entries out as a closed CBOR array without resetting the buffer (an empty array if none)
+  size_t copy_log_payload_(uint8_t *out);
 
+#ifdef USE_COAP_OSCORE
+  // A log batch must fit the COAP_CBOR_BUF_SIZE buffers it is encrypted through
+  static constexpr size_t LOG_BUF_SIZE = COAP_CBOR_BUF_SIZE;
+#else
   static constexpr size_t LOG_BUF_SIZE = 1024;
+#endif
   uint8_t log_buf_[LOG_BUF_SIZE]{};
   size_t log_buf_pos_{1};  // position 0 is always 0x9F (CBOR indefinite array start)
   bool log_buf_has_data_{false};
@@ -349,7 +357,9 @@ class CoapServer : public Component {
 
   // Builds the OSCORE inner plaintext: [code][0xC1=CF-opt][60=cbor][0xFF][payload].
   // Returns total byte count (4 + payload_len). Both transports use this before oscore_protect_response_.
-  static size_t oscore_build_inner_cbor(uint8_t code, const uint8_t *payload, size_t payload_len, uint8_t *out);
+  // Returns 0 when it does not fit in out_size.
+  static size_t oscore_build_inner_cbor(uint8_t code, const uint8_t *payload, size_t payload_len, uint8_t *out,
+                                        size_t out_size);
   // Builds the OSCORE option for outgoing notifications: flags + PIV bytes + sender KID.
   // Writes into opt_buf (caller provides >= 16 bytes). Returns the number of bytes written.
   uint8_t oscore_build_notify_option_(uint8_t *opt_buf);

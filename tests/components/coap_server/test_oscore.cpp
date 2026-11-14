@@ -48,6 +48,9 @@ class OscoreServer : public TestableCoapServerNet {
                                         plaintext_len, req);
   }
   uint8_t notify_option(uint8_t *buf) { return this->oscore_build_notify_option_(buf); }
+  static size_t build_inner(const uint8_t *payload, size_t payload_len, uint8_t *out, size_t out_size) {
+    return oscore_build_inner_cbor(0x45, payload, payload_len, out, out_size);
+  }
 
   uint32_t sender_seq() const { return this->oscore_sender_seq_no_; }
   void set_sender_seq(uint32_t seq) { this->oscore_sender_seq_no_ = seq; }
@@ -138,6 +141,36 @@ TEST(OscoreKeys, KeyMaterialClearedAfterDerivation) {
 // ---------------------------------------------------------------------------
 // Partial IV, nonce and AAD
 // ---------------------------------------------------------------------------
+
+TEST(OscoreInner, FitsExactly) {
+  const uint8_t payload[] = {0xA1, 0x02, 0x01};
+  uint8_t out[4 + sizeof(payload)];
+
+  ASSERT_EQ(OscoreServer::build_inner(payload, sizeof(payload), out, sizeof(out)), sizeof(out));
+  EXPECT_EQ(out[0], 0x45u);
+  EXPECT_EQ(out[3], 0xFFu);
+  EXPECT_EQ(memcmp(out + 4, payload, sizeof(payload)), 0);
+}
+
+TEST(OscoreInner, TooLargeIsRefused) {
+  const uint8_t payload[] = {0xA1, 0x02, 0x01};
+  uint8_t out[4 + sizeof(payload)];
+  memset(out, 0xEE, sizeof(out));
+
+  EXPECT_EQ(OscoreServer::build_inner(payload, sizeof(payload), out, sizeof(out) - 1), 0u);
+  EXPECT_EQ(OscoreServer::build_inner(payload, 0, out, 3), 0u);  // no room for the header
+  EXPECT_EQ(out[0], 0xEEu);                                      // nothing written
+}
+
+TEST(OscoreInner, EmptyInnerIsNotProtected) {
+  OscoreServer srv;
+  CoapServer::OscoreRequestInfo req{};
+  uint8_t out[64];
+  const uint32_t seq = srv.sender_seq();
+
+  EXPECT_EQ(srv.protect(out, 0, req, true, out, sizeof(out)), 0u);
+  EXPECT_EQ(srv.sender_seq(), seq);  // no sequence number used up
+}
 
 TEST(OscorePiv, ShortestBigEndian) {
   struct Case {

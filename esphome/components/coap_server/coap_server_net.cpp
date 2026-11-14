@@ -11,6 +11,13 @@ namespace esphome::coap_server {
 
 ESPHOME_LOG_TAG(TAG, "coap_server");
 static constexpr uint32_t PING_TIMEOUT_ID_BASE = 0;
+
+// RFC 7252 §4.8 defaults, as OpenThread uses: the first wait is ACK_TIMEOUT times a random factor of 1 to 1.5
+static constexpr uint32_t COAP_ACK_TIMEOUT_MS = 2000;
+static constexpr uint32_t COAP_ACK_RANDOM_SPREAD_MS = 1000;
+static constexpr uint8_t COAP_MAX_RETRANSMIT = 4;
+// Coarse against the 2 s and longer waits, so loop() does not walk the observers on every pass
+static constexpr uint32_t CON_CHECK_INTERVAL_MS = 250;
 static const size_t ADDR_STR_LEN = 46;  // large enough for IPv4 and IPv6 (INET6_ADDRSTRLEN)
 
 // Response type: CON(0)→ACK(2), NON(1)→NON(1)
@@ -165,6 +172,14 @@ void CoapServerNet::setup() {
 }
 
 void CoapServerNet::loop() {
+  // CON observers exist only in CON mode
+  if (this->subscription_confirm_) {
+    const uint32_t now = App.get_loop_component_start_time();
+    if (now - this->last_con_check_ms_ >= CON_CHECK_INTERVAL_MS) {
+      this->last_con_check_ms_ = now;
+      this->check_con_timeouts_(now);
+    }
+  }
   if (!this->sock_ || !this->sock_->ready())
     return;
   sockaddr_storage peer{};
@@ -613,7 +628,8 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
 
 #ifdef USE_COAP_OSCORE
     if (oscore_protected) {
-      size_t inner_len = oscore_build_inner_cbor(0x45, this->cbor_buf_, cbor_len, this->oscore_inner_);
+      size_t inner_len =
+          oscore_build_inner_cbor(0x45, this->cbor_buf_, cbor_len, this->oscore_inner_, sizeof(this->oscore_inner_));
       size_t cipher_len = oscore_protect_response_(this->oscore_inner_, inner_len, oscore_req_info, false,
                                                    this->oscore_cipher_, sizeof(this->oscore_cipher_));
       if (cipher_len == 0) {
@@ -653,7 +669,8 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
     }
 #ifdef USE_COAP_OSCORE
     if (oscore_protected) {
-      size_t inner_len = oscore_build_inner_cbor(0x44, this->cbor_buf_, cbor_len, this->oscore_inner_);
+      size_t inner_len =
+          oscore_build_inner_cbor(0x44, this->cbor_buf_, cbor_len, this->oscore_inner_, sizeof(this->oscore_inner_));
       size_t cipher_len = oscore_protect_response_(this->oscore_inner_, inner_len, oscore_req_info, false,
                                                    this->oscore_cipher_, sizeof(this->oscore_cipher_));
       if (cipher_len == 0) {
@@ -733,7 +750,9 @@ void CoapServerNet::handle_button_request_(const CoapPacket &pkt, const sockaddr
 void CoapServerNet::handle_con_response_(const CoapPacket &pkt, const sockaddr_storage &peer) {
   for (NetCoapObserver **pp = &this->active_observers_; *pp != nullptr; pp = &(*pp)->next) {
     NetCoapObserver *obs = *pp;
-    if (!obs->is_con || !obs->con_pending || obs->con_msg_id != pkt.message_id || !addr_equal(obs->peer_addr, peer))
+    if (!obs->is_con || !obs->con_pending ||
+        (obs->con_msg_id != pkt.message_id && obs->con_prev_msg_id != pkt.message_id) ||
+        !addr_equal(obs->peer_addr, peer))
       continue;
     if (pkt.type == 3) {  // RST — client rejects notifications; deregister
       ESP_LOGI(TAG, "CoAP Net: CON notify RST, freeing observer");
@@ -769,6 +788,7 @@ void CoapServerNet::on_entity_update(EntityBase *entity) {
 }
 
 void CoapServerNet::notify_observers_(NetCoapResource *resource, const uint8_t *payload, size_t payload_len) {
+  const uint32_t now = millis();
   for (NetCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
     if (obs->resource != resource)
       continue;
@@ -779,48 +799,91 @@ void CoapServerNet::notify_observers_(NetCoapResource *resource, const uint8_t *
       continue;  // waiting for ACK to previous CON before sending another CON
     if (obs->is_con)
       obs->notify_count = (obs->notify_count == 5) ? 1 : (obs->notify_count + 1);
+    if (send_con) {
+      obs->con_retransmits = 0;
+      obs->con_timeout_ms = COAP_ACK_TIMEOUT_MS + random_uint32() % (COAP_ACK_RANDOM_SPREAD_MS + 1);
+    }
+    this->send_notification_(obs, payload, payload_len, send_con, now);
+  }
+}
 
+void CoapServerNet::send_notification_(NetCoapObserver *obs, const uint8_t *payload, size_t payload_len, bool con,
+                                       uint32_t now) {
+  uint16_t msg_id = this->next_msg_id_++;
 #ifdef USE_COAP_OSCORE
-    size_t inner_len = oscore_build_inner_cbor(0x45, payload, payload_len, this->oscore_inner_);
-    OscoreRequestInfo aad_info{};
-    memcpy(aad_info.piv, obs->oscore_req_piv, obs->oscore_req_piv_len);
-    aad_info.piv_len = obs->oscore_req_piv_len;
-    memcpy(aad_info.kid, obs->oscore_req_kid, obs->oscore_req_kid_len);
-    aad_info.kid_len = obs->oscore_req_kid_len;
-    size_t cipher_len = oscore_protect_response_(this->oscore_inner_, inner_len, aad_info, true, this->oscore_cipher_,
-                                                 sizeof(this->oscore_cipher_));
+#ifdef USE_LOGGER
+  // A full log batch must fit, or every one would be dropped (4 bytes of inner header)
+  static_assert(LOG_BUF_SIZE + 4 <= sizeof(oscore_inner_), "log batch does not fit oscore_inner_");
+  static_assert(LOG_BUF_SIZE + 4 + OSCORE_TAG_LEN <= sizeof(oscore_cipher_), "log batch does not fit oscore_cipher_");
+#endif
+  size_t inner_len =
+      oscore_build_inner_cbor(0x45, payload, payload_len, this->oscore_inner_, sizeof(this->oscore_inner_));
+  OscoreRequestInfo aad_info{};
+  memcpy(aad_info.piv, obs->oscore_req_piv, obs->oscore_req_piv_len);
+  aad_info.piv_len = obs->oscore_req_piv_len;
+  memcpy(aad_info.kid, obs->oscore_req_kid, obs->oscore_req_kid_len);
+  aad_info.kid_len = obs->oscore_req_kid_len;
+  size_t cipher_len = this->oscore_protect_response_(this->oscore_inner_, inner_len, aad_info, true,
+                                                     this->oscore_cipher_, sizeof(this->oscore_cipher_));
+  if (cipher_len == 0)
+    return;
+  uint8_t oscore_opt[16];
+  uint8_t opt_pos = this->oscore_build_notify_option_(oscore_opt);
+  this->builder_.begin(con ? 0 : 1, 0x45, msg_id, obs->token, obs->token_len);
+  this->builder_.option_uint(6, obs->observe_serial++);
+  this->builder_.option(9, oscore_opt, opt_pos);
+  this->builder_.payload_marker();
+  this->builder_.append(this->oscore_cipher_, cipher_len);
+#else
+  this->builder_.begin(con ? 0 : 1, 0x45, msg_id, obs->token, obs->token_len);
+  this->builder_.option_uint(6, obs->observe_serial++);
+  uint8_t cf = 60;
+  this->builder_.option(12, &cf, 1);
+  this->builder_.payload_marker();
+  this->builder_.append(payload, payload_len);
+#endif
+  this->send_response(this->builder_.buf, this->builder_.pos, &obs->peer_addr);
+  if (con) {
+    // A resend replaces the previous message, whose late ACK still confirms the observation
+    obs->con_prev_msg_id = obs->con_retransmits > 0 ? obs->con_msg_id : msg_id;
+    obs->con_msg_id = msg_id;
+    obs->con_pending = true;
+    obs->con_sent_ms = now;
+  }
+}
 
-    uint8_t oscore_opt[16];
-    uint8_t opt_pos = this->oscore_build_notify_option_(oscore_opt);
-
-    if (cipher_len > 0) {
-      uint16_t msg_id = this->next_msg_id_++;
-      this->builder_.begin(send_con ? 0 : 1, 0x45, msg_id, obs->token, obs->token_len);
-      this->builder_.option_uint(6, obs->observe_serial++);
-      this->builder_.option(9, oscore_opt, opt_pos);
-      this->builder_.payload_marker();
-      this->builder_.append(this->oscore_cipher_, cipher_len);
-      send_response(this->builder_.buf, this->builder_.pos, &obs->peer_addr);
-      if (send_con) {
-        obs->con_msg_id = msg_id;
-        obs->con_pending = true;
+void CoapServerNet::check_con_timeouts_(uint32_t now) {
+  for (NetCoapObserver *obs = this->active_observers_; obs != nullptr;) {
+    NetCoapObserver *next = obs->next;  // obs may be freed below
+    if (obs->con_pending && now - obs->con_sent_ms >= obs->con_timeout_ms) {
+      if (obs->con_retransmits >= COAP_MAX_RETRANSMIT) {
+        ESP_LOGI(TAG, "CoAP Net: CON notify not acknowledged, freeing observer");
+        this->free_observer_(obs);
+      } else {
+        obs->con_retransmits++;
+        obs->con_timeout_ms *= 2;
+        this->resend_con_(obs, now);
       }
     }
-#else
-    uint16_t msg_id = this->next_msg_id_++;
-    this->builder_.begin(send_con ? 0 : 1, 0x45, msg_id, obs->token, obs->token_len);
-    this->builder_.option_uint(6, obs->observe_serial++);
-    uint8_t cf = 60;
-    this->builder_.option(12, &cf, 1);
-    this->builder_.payload_marker();
-    this->builder_.append(payload, payload_len);
-    send_response(this->builder_.buf, this->builder_.pos, &obs->peer_addr);
-    if (send_con) {
-      obs->con_msg_id = msg_id;
-      obs->con_pending = true;
-    }
-#endif
+    obs = next;
   }
+}
+
+// RFC 7641 §4.5.2: the resend carries the current state, as a newer notification may replace one in transit
+void CoapServerNet::resend_con_(NetCoapObserver *obs, uint32_t now) {
+#ifdef USE_LOGGER
+  if (obs->resource == this->logs_resource_) {
+    uint8_t payload[LOG_BUF_SIZE];
+    this->send_notification_(obs, payload, this->copy_log_payload_(payload), true, now);
+    return;
+  }
+#endif
+  size_t len = cbor_output_(this->cbor_buf_, sizeof(this->cbor_buf_), obs->resource->entity, obs->resource->type);
+  if (len == 0) {
+    obs->con_sent_ms = now;  // nothing to send; wait out this attempt
+    return;
+  }
+  this->send_notification_(obs, this->cbor_buf_, len, true, now);
 }
 
 // ---------------------------------------------------------------------------

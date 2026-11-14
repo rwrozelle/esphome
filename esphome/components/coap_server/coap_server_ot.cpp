@@ -498,7 +498,7 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
 #ifdef USE_COAP_OSCORE
     if (oscore_protected) {
       uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
-      size_t inner_len = oscore_build_inner_cbor(0x45, payload_buffer, payload_len, inner);
+      size_t inner_len = oscore_build_inner_cbor(0x45, payload_buffer, payload_len, inner, sizeof(inner));
       uint8_t ciphertext[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
       size_t cipher_len =
           this->oscore_protect_response_(inner, inner_len, oscore_req_info, false, ciphertext, sizeof(ciphertext));
@@ -563,7 +563,7 @@ void CoapServerOT::handle_entity_request(ehCoapResource *resource, otMessage *me
 #ifdef USE_COAP_OSCORE
     if (oscore_protected) {
       uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
-      size_t inner_len = oscore_build_inner_cbor(0x44, payload_buffer, payload_len, inner);
+      size_t inner_len = oscore_build_inner_cbor(0x44, payload_buffer, payload_len, inner, sizeof(inner));
       uint8_t ciphertext[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
       size_t cipher_len =
           this->oscore_protect_response_(inner, inner_len, oscore_req_info, false, ciphertext, sizeof(ciphertext));
@@ -842,8 +842,13 @@ void CoapServerOT::handle_observer_(ehCoapObserver *observer, ehCoapResource *ex
 #ifdef USE_COAP_OSCORE
   {
     uint8_t inner[COAP_PAYLOAD_MAX_SIZE + 8];
-    size_t inner_len = oscore_build_inner_cbor(0x45, payload, payload_len, inner);
     uint8_t ciphertext[COAP_PAYLOAD_MAX_SIZE + OSCORE_TAG_LEN + 8];
+#ifdef USE_LOGGER
+    // A full log batch must fit, or every one would be dropped (4 bytes of inner header)
+    static_assert(LOG_BUF_SIZE + 4 <= sizeof(inner), "log batch does not fit inner");
+    static_assert(LOG_BUF_SIZE + 4 + OSCORE_TAG_LEN <= sizeof(ciphertext), "log batch does not fit ciphertext");
+#endif
+    size_t inner_len = oscore_build_inner_cbor(0x45, payload, payload_len, inner, sizeof(inner));
     size_t cipher_len =
         this->oscore_protect_response_(inner, inner_len, aad_info, true, ciphertext, sizeof(ciphertext));
     if (cipher_len == 0) {
