@@ -319,10 +319,14 @@ bool CoapServerNet::parse_coap(const uint8_t *buf, size_t len, CoapPacket *pkt) 
     pos += opt_len;
 
     switch (opt_num) {
-      case 6:  // Observe
+      case 6: {  // Observe: 0 registers, 1 deregisters, anything else (2 here) does neither
+        uint32_t val = 0;
+        for (uint16_t i = 0; i < opt_len && i < 3; i++)
+          val = (val << 8) | oval[i];
         pkt->observe_present = true;
-        pkt->observe = (opt_len == 0) ? 0 : oval[opt_len - 1];
+        pkt->observe = (opt_len > 3 || val > 1) ? 2 : (uint8_t) val;
         break;
+      }
       case 9:  // OSCORE
         if (opt_len <= sizeof(pkt->oscore_opt)) {
           memcpy(pkt->oscore_opt, oval, opt_len);
@@ -369,6 +373,15 @@ void CoapServerNet::process_datagram_(const uint8_t *buf, size_t len, const sock
 
   if (pkt.type == 2 || pkt.type == 3) {  // ACK or RST — response to a CON notification we sent
     this->handle_con_response_(pkt, *peer);
+    return;
+  }
+
+  // An empty CON is a CoAP ping and gets a Reset (RFC 7252 §4.3); an empty NON is ignored
+  if (pkt.code == 0) {
+    if (pkt.type == 0) {
+      this->builder_.begin(3, 0, pkt.message_id, nullptr, 0);
+      this->send_response(this->builder_.buf, this->builder_.pos, peer);
+    }
     return;
   }
 

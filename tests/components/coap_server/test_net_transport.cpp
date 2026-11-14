@@ -53,6 +53,23 @@ TEST(CoapServerNetParse, ParseObserveRegister) {
   EXPECT_EQ(pkt.observe, 0u);
 }
 
+// Observe values other than 0 and 1 neither register nor deregister, whatever their low byte
+TEST(CoapServerNetParse, ParseObserveMultiByteValueIsNeither) {
+  std::vector<uint8_t> raw{0x51, 0x01, 0x00, 0x01, 0xAB, 0x62, 0x01, 0x00};  // NON GET, Observe 256
+  append_uri_path(raw, "fp/1/g/1", 6);
+  CoapServerNet::CoapPacket pkt{};
+  ASSERT_TRUE(CoapServerNet::parse_coap(raw.data(), raw.size(), &pkt));
+  EXPECT_TRUE(pkt.observe_present);
+  EXPECT_EQ(pkt.observe, 2u);
+}
+
+TEST(CoapServerNetParse, ParseObserveTwoIsNeither) {
+  auto raw = make_coap_get("fp/1/g/1", 1, 2);
+  CoapServerNet::CoapPacket pkt{};
+  ASSERT_TRUE(CoapServerNet::parse_coap(raw.data(), raw.size(), &pkt));
+  EXPECT_EQ(pkt.observe, 2u);
+}
+
 TEST(CoapServerNetParse, ParseObserveDeregister) {
   auto raw = make_coap_get("fp/1/g/1", 1, 1);
   CoapServerNet::CoapPacket pkt{};
@@ -864,6 +881,29 @@ TEST(CoapServerNetPingInterval, ClientThatStopsAnsweringIsFreed) {
 
   EXPECT_FALSE(c->active);
   EXPECT_EQ(srv.get_active_client_count(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// CoAP ping (RFC 7252 §4.3)
+// ---------------------------------------------------------------------------
+
+TEST(CoapServerNetCoapPing, EmptyConGetsReset) {
+  TestableCoapServerNet srv;
+  srv.init_resources(1);
+  srv.inject({0x40, 0x00, 0x12, 0x34}, make_peer());  // empty CON, message id 0x1234
+
+  ASSERT_EQ(srv.last_sent.size(), 4u);
+  EXPECT_EQ(srv.last_sent[0], 0x70u);  // version 1, RST, no token
+  EXPECT_EQ(srv.last_sent[1], 0x00u);  // empty
+  EXPECT_EQ(message_id(srv.last_sent), 0x1234u);
+}
+
+TEST(CoapServerNetCoapPing, EmptyNonIsIgnored) {
+  TestableCoapServerNet srv;
+  srv.init_resources(1);
+  srv.inject({0x50, 0x00, 0x12, 0x35}, make_peer());
+
+  EXPECT_TRUE(srv.last_sent.empty());
 }
 
 }  // namespace

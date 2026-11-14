@@ -22,6 +22,9 @@ class CoapServer;
 
 static constexpr size_t COAP_PAYLOAD_MAX_SIZE = 256;
 static constexpr size_t COAP_PAYLOAD_SMALL_SIZE = 64;
+// One .well-known/core entry at its largest: a 120-character name that is all escaped quotes, plus unit,
+// device class and number limits
+static constexpr size_t LINK_ENTRY_MAX_SIZE = 512;
 // CBOR buffer sized for the largest entity type actually in the build.
 // text_sensor values can fill the full 256 bytes; all other entity types fit in 64.
 // With OSCORE, a log batch is encrypted through buffers of this size, so it needs the full 256 bytes too.
@@ -331,7 +334,10 @@ class CoapServer : public Component {
   uint8_t oscore_sender_id_buf_[8]{};
   uint8_t oscore_sender_id_len_{0};
 
+  // Derives the keys and wipes the material from YAML, whether derivation worked or not; on failure it also
+  // wipes any keys already derived
   bool oscore_derive_keys_();
+  bool oscore_derive_keys_from_material_();
   // Continues from the stored sequence number and stores the next block
   void oscore_restore_seq_no_();
   void oscore_save_seq_no_();

@@ -141,6 +141,17 @@ TEST(OscoreKeys, KeyMaterialClearedAfterDerivation) {
   EXPECT_TRUE(srv.key_material_cleared());
 }
 
+TEST(OscoreKeys, KeyMaterialClearedWhenDerivationFails) {
+  OscoreServer srv;
+  // The sender key is derived, then the Recipient ID is too long for the HKDF info buffer
+  srv.set_material({0x01}, std::vector<uint8_t>(60, 0x02));
+  ASSERT_FALSE(srv.derive_keys());
+  EXPECT_TRUE(srv.key_material_cleared());
+  const uint8_t zeros[OSCORE_AES_KEY_LEN] = {};
+  EXPECT_EQ(memcmp(srv.sender_key(), zeros, sizeof(zeros)), 0);
+  EXPECT_EQ(memcmp(srv.recipient_key(), zeros, sizeof(zeros)), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Partial IV, nonce and AAD
 // ---------------------------------------------------------------------------

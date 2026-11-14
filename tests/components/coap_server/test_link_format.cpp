@@ -65,6 +65,32 @@ TEST(LinkFormatEntry, QuoteAndBackslashInTitleAreEscaped) {
   EXPECT_TRUE(contains(e, R"(;title="12\" pipe \\ temp";oid=)")) << e;
 }
 
+// The largest entry must fit LINK_ENTRY_MAX_SIZE, the buffer build_link_format() formats each entry into.
+// Only "temperature" and "°C" are registered here; the 64 bytes of headroom cover longer ones (the longest
+// device class, volatile_organic_compounds_parts, is 21 characters longer).
+TEST(LinkFormatEntry, LargestEntriesFitTheEntryBuffer) {
+  const std::string name(ESPHOME_ENTITY_NAME_MAX_LEN, '"');  // every character escaped
+  char buf[LINK_ENTRY_MAX_SIZE];
+
+  TestSensor s;
+  s.configure(name.c_str(), UINT32_MAX, dc_uom_fields("temperature", "°C"));
+  s.set_accuracy_decimals(-10);
+  uint16_t len = LinkFormatServer::entry_into(buf, sizeof(buf), &s, ENTITYTYPE_SENSOR);
+  ASSERT_LT(len + 64, sizeof(buf)) << "sensor entry too close to the buffer size";
+  EXPECT_GT(len, 256u);  // longer than the buffer this replaced
+  EXPECT_TRUE(contains(std::string(buf, len), ";dc=")) << "device class not registered by the test codegen";
+  EXPECT_TRUE(contains(std::string(buf, len), ";uom=")) << "unit not registered by the test codegen";
+
+  TestNumber n;
+  n.configure(name.c_str(), UINT32_MAX, dc_uom_fields("temperature", nullptr));
+  n.traits.set_min_value(-1.23456789e-30f);
+  n.traits.set_max_value(-9.87654321e+30f);
+  n.traits.set_step(1.23456789e-30f);
+  len = LinkFormatServer::entry_into(buf, sizeof(buf), &n, ENTITYTYPE_NUMBER);
+  ASSERT_LT(len + 64, sizeof(buf)) << "number entry too close to the buffer size";
+  EXPECT_TRUE(contains(std::string(buf, len), ";step=")) << std::string(buf, len);
+}
+
 TEST(LinkFormatEntry, SensorWithoutUomOrDcOmitsThem) {
   TestSensor s;
   s.configure("raw", 1u);

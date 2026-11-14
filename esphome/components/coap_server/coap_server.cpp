@@ -71,7 +71,7 @@ bool CoapServer::blockwise_transmit_hook(void *ctx, uint8_t *block_buf, uint32_t
 
 // static
 size_t CoapServer::build_link_format(uint8_t *buf, size_t buf_len) {
-  char entry[256];
+  char entry[LINK_ENTRY_MAX_SIZE];
   char path[32];
   size_t total = 0;
   uint16_t senml = 1;
@@ -349,10 +349,40 @@ static size_t oscore_build_info(uint8_t *buf, size_t buf_len, const uint8_t *id,
   return cbor_encoder_get_buffer_size(&enc, buf);
 }
 
+// Overwrites key material; volatile stores cannot be dropped as dead before the memory is freed
+static void oscore_wipe(void *buf, size_t len) {
+  volatile uint8_t *p = static_cast<volatile uint8_t *>(buf);
+  for (size_t i = 0; i < len; i++)
+    p[i] = 0;
+}
+
+static void oscore_wipe(std::vector<uint8_t> &v) {
+  if (!v.empty())
+    oscore_wipe(v.data(), v.size());
+  v.clear();
+  v.shrink_to_fit();
+}
+
 bool CoapServer::oscore_derive_keys_() {
+  const bool ok = this->oscore_derive_keys_from_material_();
+  // Only derivation needs the YAML material, so it is wiped whether that worked or not
+  oscore_wipe(this->oscore_master_secret_);
+  oscore_wipe(this->oscore_master_salt_);
+  oscore_wipe(this->oscore_sender_id_);
+  oscore_wipe(this->oscore_recipient_id_);
+  oscore_wipe(this->oscore_id_context_);
+  if (!ok) {
+    // Keys from the steps that worked are of no use to a failed component
+    oscore_wipe(this->oscore_sender_key_, sizeof(this->oscore_sender_key_));
+    oscore_wipe(this->oscore_recipient_key_, sizeof(this->oscore_recipient_key_));
+    oscore_wipe(this->oscore_common_iv_, sizeof(this->oscore_common_iv_));
+  }
+  return ok;
+}
+
+bool CoapServer::oscore_derive_keys_from_material_() {
   uint8_t info_buf[64];
   size_t info_len;
-  uint8_t key_buf[OSCORE_KEY_LEN];
 
   // Sender key — derive and store raw bytes; imported as transient PSA key per encrypt call
   info_len =
@@ -360,11 +390,9 @@ bool CoapServer::oscore_derive_keys_() {
                         this->oscore_id_context_.data(), this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
   if (info_len == 0 || !oscore_hkdf_sha256(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
                                            this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
-                                           info_len, key_buf, OSCORE_KEY_LEN)) {
+                                           info_len, this->oscore_sender_key_, OSCORE_KEY_LEN)) {
     return false;
   }
-  memcpy(this->oscore_sender_key_, key_buf, OSCORE_KEY_LEN);
-  memset(key_buf, 0, sizeof(key_buf));
 
   // Recipient key — derive and store raw bytes; imported as transient PSA key per decrypt call
   info_len = oscore_build_info(info_buf, sizeof(info_buf), this->oscore_recipient_id_.data(),
@@ -372,11 +400,9 @@ bool CoapServer::oscore_derive_keys_() {
                                this->oscore_id_context_.size(), "Key", OSCORE_KEY_LEN);
   if (info_len == 0 || !oscore_hkdf_sha256(this->oscore_master_secret_.data(), this->oscore_master_secret_.size(),
                                            this->oscore_master_salt_.data(), this->oscore_master_salt_.size(), info_buf,
-                                           info_len, key_buf, OSCORE_KEY_LEN)) {
+                                           info_len, this->oscore_recipient_key_, OSCORE_KEY_LEN)) {
     return false;
   }
-  memcpy(this->oscore_recipient_key_, key_buf, OSCORE_KEY_LEN);
-  memset(key_buf, 0, sizeof(key_buf));
 
   // Common IV — stored as raw bytes for nonce construction (not an AEAD key)
   info_len = oscore_build_info(info_buf, sizeof(info_buf), nullptr, 0, this->oscore_id_context_.data(),
@@ -389,22 +415,10 @@ bool CoapServer::oscore_derive_keys_() {
 
   ESP_LOGI(TAG, "OSCORE keys derived");
 
-  // Retain sender ID (needed for notification OSCORE option) then release all key material.
+  // Retain sender ID (needed for notification OSCORE option); the caller wipes the rest
   this->oscore_sender_id_len_ = (uint8_t) std::min(this->oscore_sender_id_.size(), sizeof(this->oscore_sender_id_buf_));
   if (this->oscore_sender_id_len_ > 0)  // an empty Sender ID is valid, and its data() may be null
     memcpy(this->oscore_sender_id_buf_, this->oscore_sender_id_.data(), this->oscore_sender_id_len_);
-
-  this->oscore_master_secret_.clear();
-  this->oscore_master_secret_.shrink_to_fit();
-  this->oscore_master_salt_.clear();
-  this->oscore_master_salt_.shrink_to_fit();
-  this->oscore_sender_id_.clear();
-  this->oscore_sender_id_.shrink_to_fit();
-  this->oscore_recipient_id_.clear();
-  this->oscore_recipient_id_.shrink_to_fit();
-  this->oscore_id_context_.clear();
-  this->oscore_id_context_.shrink_to_fit();
-
   return true;
 }
 
