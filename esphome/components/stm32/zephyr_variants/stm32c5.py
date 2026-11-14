@@ -32,10 +32,23 @@ def config_schema(config: ConfigType) -> ConfigType:
 
 def to_code(config: ConfigType) -> None:
     # deferred: zephyr's __init__ may load the variants while it imports
-    from esphome.components.zephyr import zephyr_add_prj_conf, zephyr_setup_preferences
+    from esphome.components.zephyr import (
+        zephyr_add_overlay,
+        zephyr_add_prj_conf,
+        zephyr_setup_preferences,
+    )
+    from esphome.components.zephyr.dts_lookup import get_rng_node_label
 
     cg.add_define("ESPHOME_BOARD", config[CONF_BOARD])
     cg.add_define("ESPHOME_VARIANT", VARIANT_NAME)
     cg.add_define(ThreadModel.MULTI_ATOMICS)
     zephyr_setup_preferences()
     zephyr_add_prj_conf("REBOOT", True)
+
+    # random_bytes() needs an entropy source: the SoC's RNG when the devicetree has
+    # one, otherwise Zephyr's test generator, which is not cryptographically secure
+    if (rng_label := get_rng_node_label(config[CONF_BOARD])) is not None:
+        zephyr_add_prj_conf("ENTROPY_GENERATOR", True)
+        zephyr_add_overlay(f'&{rng_label} {{ status = "okay"; }};')
+    else:
+        zephyr_add_prj_conf("TEST_RANDOM_GENERATOR", True)

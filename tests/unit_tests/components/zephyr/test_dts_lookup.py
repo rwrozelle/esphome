@@ -28,6 +28,7 @@ from esphome.components.zephyr.dts_lookup import (
     _get_edt,
     _iter_nodes,
     get_console_uart_label,
+    get_rng_node_label,
     get_uart_controller_labels,
     get_watchdog_node_label,
     resolve_uart_node_label,
@@ -726,12 +727,14 @@ class _FakeNode:
         status: str = "okay",
         aliases: list[str] | None = None,
         binding_path: str | None = None,
+        compats: list[str] | None = None,
     ) -> None:
         self.labels = labels
         self.buses = buses or []
         self.status = status
         self.aliases = aliases or []
         self.binding_path = binding_path
+        self.compats = compats or []
 
 
 class _FakeEdt:
@@ -888,3 +891,50 @@ def test_watchdog_node_label(
 @pytest.mark.usefixtures("no_edt")
 def test_watchdog_node_label_without_a_devicetree() -> None:
     assert get_watchdog_node_label("nucleo_c5a3zg") == (None, False)
+
+
+def _rng(label: str, status: str = "okay") -> _FakeNode:
+    return _FakeNode([label], status=status, compats=["st,stm32-rng"])
+
+
+@pytest.mark.parametrize(
+    ("nodes", "expected"),
+    [
+        # The SoC file ships it disabled; the variant enables it
+        ([_FakeNode(["usart1"]), _rng("rng", "disabled")], "rng"),
+        ([_rng("rng")], "rng"),
+        # A matching node without a label can't be referenced
+        ([_FakeNode([], compats=["st,stm32-rng"]), _rng("rng2")], "rng2"),
+        ([_FakeNode(["usart1"])], None),
+    ],
+)
+def test_rng_node_label(
+    board_edt: Callable[..., None], nodes: list[_FakeNode], expected: str | None
+) -> None:
+    board_edt(nodes)
+    assert get_rng_node_label("nucleo_c5a3zg") == expected
+
+
+def test_rng_node_label_of_another_compatible(board_edt: Callable[..., None]) -> None:
+    board_edt([_rng("rng"), _FakeNode(["trng"], compats=["nxp,els-trng"])])
+    assert get_rng_node_label("frdm_mcxn236", "nxp,els-trng") == "trng"
+
+
+@pytest.mark.parametrize(
+    ("enabled_only", "expected"), [(True, "rng2"), (False, "rng1")]
+)
+def test_find_node_label_by_compat_can_skip_disabled_nodes(
+    board_edt: Callable[..., None], enabled_only: bool, expected: str
+) -> None:
+    board_edt([_rng("rng1", "disabled"), _rng("rng2")])
+    assert (
+        dts_lookup._find_node_label_by_compat(
+            "nucleo_c5a3zg", "st,stm32-rng", enabled_only=enabled_only
+        )
+        == expected
+    )
+
+
+@pytest.mark.usefixtures("no_edt")
+def test_rng_node_label_without_a_devicetree() -> None:
+    assert get_rng_node_label("nucleo_c5a3zg") is None

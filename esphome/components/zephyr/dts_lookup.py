@@ -445,3 +445,26 @@ def get_watchdog_node_label(board: str) -> tuple[str | None, bool]:
         ):
             return node.labels[0], False
     return None, False
+
+
+def _find_node_label_by_compat(
+    board: str, compat: str, *, enabled_only: bool
+) -> str | None:
+    """The label of the first node whose ``compatible`` has ``compat``, or None.
+    ``enabled_only=False`` finds nodes the SoC file ships disabled, such as STM32's RNG."""
+    edt = _get_edt(board)
+    if edt is None:
+        return None
+    for node in _iter_nodes(edt):
+        if (
+            compat in node.compats
+            and node.labels
+            and (not enabled_only or node.status == "okay")
+        ):
+            return node.labels[0]
+    return None
+
+
+def get_rng_node_label(board: str, compat: str = "st,stm32-rng") -> str | None:
+    """The label of the board's ``compat`` RNG node, enabled or not, or None."""
+    return _find_node_label_by_compat(board, compat, enabled_only=False)

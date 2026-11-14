@@ -1,15 +1,18 @@
 """Tests for the STM32 Zephyr variants."""
 
+from collections.abc import Callable
+
 import pytest
 
 from esphome.components.stm32.zephyr_variants import stm32_family, stm32c5
 from esphome.components.zephyr import (
+    dts_lookup,
     zephyr_data,
     zephyr_framework_type,
     zephyr_variant,
     zephyr_variant_family,
 )
-from esphome.components.zephyr.const import KEY_BOOTLOADER, KEY_PRJ_CONF
+from esphome.components.zephyr.const import KEY_BOOTLOADER, KEY_OVERLAY, KEY_PRJ_CONF
 import esphome.config_validation as cv
 from esphome.const import CONF_BOARD, CONF_FRAMEWORK, KEY_CORE, KEY_FRAMEWORK_VERSION
 from esphome.core import CORE
@@ -46,7 +49,18 @@ def test_config_schema_keeps_the_board() -> None:
     assert zephyr_data()[CONF_BOARD] == "xiao_stm32c5"
 
 
-def test_to_code() -> None:
+@pytest.fixture
+def rng_label(monkeypatch: pytest.MonkeyPatch) -> Callable[[str | None], None]:
+    """Give the board the RNG node label passed in, or none."""
+
+    def _set(label: str | None) -> None:
+        monkeypatch.setattr(dts_lookup, "get_rng_node_label", lambda board: label)
+
+    return _set
+
+
+def test_to_code(rng_label: Callable[[str | None], None]) -> None:
+    rng_label("rng")
     stm32c5.config_schema({CONF_FRAMEWORK: {}})
 
     stm32c5.to_code({CONF_BOARD: "nucleo_c5a3zg"})
@@ -57,6 +71,31 @@ def test_to_code() -> None:
     assert "ESPHOME_THREAD_MULTI_ATOMICS" in defines
     assert _prj_conf()["REBOOT"] is True
     assert _prj_conf()["SETTINGS"] is True
+
+
+@pytest.mark.parametrize(
+    ("label", "prj_conf", "overlay"),
+    [
+        ("rng", "ENTROPY_GENERATOR", '&rng { status = "okay"; };'),
+        (None, "TEST_RANDOM_GENERATOR", ""),
+    ],
+)
+def test_to_code_picks_the_entropy_source(
+    rng_label: Callable[[str | None], None],
+    label: str | None,
+    prj_conf: str,
+    overlay: str,
+) -> None:
+    """The SoC's RNG when the devicetree has one, else the test generator."""
+    rng_label(label)
+    stm32c5.config_schema({CONF_FRAMEWORK: {}})
+
+    stm32c5.to_code({CONF_BOARD: "nucleo_c5a3zg"})
+
+    other = ({"ENTROPY_GENERATOR", "TEST_RANDOM_GENERATOR"} - {prj_conf}).pop()
+    assert _prj_conf()[prj_conf] is True
+    assert other not in _prj_conf()
+    assert zephyr_data()[KEY_OVERLAY].get("", "").strip() == overlay
 
 
 def test_family_to_code() -> None:
