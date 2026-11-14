@@ -29,6 +29,7 @@ from esphome.components.zephyr.dts_lookup import (
     _iter_nodes,
     get_console_uart_label,
     get_uart_controller_labels,
+    get_watchdog_node_label,
     resolve_uart_node_label,
 )
 from esphome.core import CORE, EsphomeError
@@ -723,10 +724,14 @@ class _FakeNode:
         labels: list[str],
         buses: list[str] | None = None,
         status: str = "okay",
+        aliases: list[str] | None = None,
+        binding_path: str | None = None,
     ) -> None:
         self.labels = labels
         self.buses = buses or []
         self.status = status
+        self.aliases = aliases or []
+        self.binding_path = binding_path
 
 
 class _FakeEdt:
@@ -835,3 +840,51 @@ def test_resolve_uart_node_label_needs_the_console(
     board_edt([_uart("usart1")], console)
     with pytest.raises(EsphomeError, match="Cannot determine the console UART"):
         resolve_uart_node_label("nucleo_c5a3zg", "UART0")
+
+
+_WDT_BINDING: str = "/zephyr/dts/bindings/watchdog/st,stm32-window-watchdog.yaml"
+
+
+@pytest.mark.parametrize(
+    ("nodes", "expected"),
+    [
+        # The board already aliases watchdog0 to an enabled node
+        ([_FakeNode(["wdt0"], aliases=["watchdog0"])], ("wdt0", True)),
+        ([_FakeNode([], aliases=["watchdog0"])], (None, True)),
+        # STM32 shape: a watchdog node exists, found by its binding, but nothing
+        # aliases it
+        (
+            [
+                _FakeNode(["uart0"], binding_path="/zephyr/dts/bindings/serial/x.yaml"),
+                _FakeNode([], binding_path=_WDT_BINDING),
+                _FakeNode(["wwdg"], status="disabled", binding_path=_WDT_BINDING),
+            ],
+            ("wwdg", False),
+        ),
+        # An alias on a disabled node doesn't count as working
+        (
+            [
+                _FakeNode(
+                    ["wwdg"],
+                    status="disabled",
+                    aliases=["watchdog0"],
+                    binding_path=_WDT_BINDING,
+                )
+            ],
+            ("wwdg", False),
+        ),
+        ([_FakeNode(["uart0"])], (None, False)),
+    ],
+)
+def test_watchdog_node_label(
+    board_edt: Callable[..., None],
+    nodes: list[_FakeNode],
+    expected: tuple[str | None, bool],
+) -> None:
+    board_edt(nodes)
+    assert get_watchdog_node_label("nucleo_c5a3zg") == expected
+
+
+@pytest.mark.usefixtures("no_edt")
+def test_watchdog_node_label_without_a_devicetree() -> None:
+    assert get_watchdog_node_label("nucleo_c5a3zg") == (None, False)

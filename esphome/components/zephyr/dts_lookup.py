@@ -424,3 +424,24 @@ def resolve_uart_node_label(board: str, hw_uart: str) -> str:
         )
     _LOGGER.info("%s on board '%s' is %s", hw_uart, board, label)
     return label
+
+
+def get_watchdog_node_label(board: str) -> tuple[str | None, bool]:
+    """``(label, already_working)`` for the board's watchdog. Found by its binding
+    being in Zephyr's bindings/watchdog/ folder, so every vendor is covered;
+    already_working is True when an enabled node already has the watchdog0 alias."""
+    edt = _get_edt(board)
+    if edt is None:
+        return None, False
+    for node in _iter_nodes(edt):
+        if "watchdog0" in node.aliases and node.status == "okay":
+            return (node.labels[0] if node.labels else None), True
+    for node in _iter_nodes(edt):
+        binding_path = node.binding_path
+        if (
+            binding_path
+            and Path(binding_path).parent.name == "watchdog"
+            and node.labels
+        ):
+            return node.labels[0], False
+    return None, False
