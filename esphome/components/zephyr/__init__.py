@@ -101,6 +101,14 @@ class ZephyrData(TypedDict):
     variant: NotRequired[str]
     family: NotRequired[str | None]
     framework_type: NotRequired[str]
+    # The devicetree caches (dts_lookup); "" = not looked for, None = no preprocessor
+    cpp_path: NotRequired[str | None]
+    # None = not built yet
+    dts_include_paths: NotRequired[list[str] | None]
+    # board -> its folder, "" = not found
+    board_dir_cache: NotRequired[dict[str, str]]
+    # board -> its parsed devicetree, or dts_lookup._NOT_FOUND
+    board_edt_cache: NotRequired[dict[str, object]]
 
 
 def zephyr_set_core_data(config: ConfigType) -> None:

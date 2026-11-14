@@ -24,7 +24,11 @@ from esphome.core import CORE
 from esphome.types import ConfigType
 
 from ..const import (
+    KEY_BOARD_DIR_CACHE,
+    KEY_BOARD_EDT_CACHE,
     KEY_BOOTLOADER,
+    KEY_CPP_PATH,
+    KEY_DTS_INCLUDE_PATHS,
     KEY_FAMILY,
     KEY_FRAMEWORK_TYPE,
     KEY_VARIANT,
@@ -163,6 +167,11 @@ def set_core_data(
     zephyr_data()[KEY_VARIANT] = variant_name
     zephyr_data()[KEY_FAMILY] = VARIANTS[variant_name].family
     zephyr_data()[KEY_FRAMEWORK_TYPE] = framework_type
+    # The devicetree caches, filled as code generation reads the board
+    zephyr_data()[KEY_CPP_PATH] = ""
+    zephyr_data()[KEY_DTS_INCLUDE_PATHS] = None
+    zephyr_data()[KEY_BOARD_DIR_CACHE] = {}
+    zephyr_data()[KEY_BOARD_EDT_CACHE] = {}
     CORE.data[KEY_CORE][KEY_TARGET_FRAMEWORK] = KEY_ZEPHYR
     CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION] = framework_ver
 

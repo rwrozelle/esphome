@@ -4,7 +4,8 @@ from pathlib import Path
 import time
 
 from esphome.build_helpers.tools_cache import ZEPHYR_TOOLS_CACHE, tools_cache_path
-from esphome.core import EsphomeError
+from esphome.const import KEY_CORE, KEY_FRAMEWORK_VERSION
+from esphome.core import CORE, EsphomeError
 from esphome.framework_helpers import get_python_env_executable_path, install_lock
 
 from .framework_helpers import (
@@ -16,7 +17,7 @@ from .framework_helpers import (
     patch_west_build_source_dir_relpath,
 )
 from .sdk_install import ensure_sdk
-from .variants import ZephyrSDK
+from .variants import VARIANTS, ZephyrSDK, resolve_sdk
 
 _REQUIREMENTS: Path = Path(__file__).parent / "requirements.txt"
 # The SDK versions in use are unknown; a partial download untouched this long has no owner,
@@ -42,6 +43,21 @@ def _get_toolchain_path(sdk_version: str, toolchain: str) -> Path:
 
 def _get_framework_path(sdk: ZephyrSDK, version: str) -> Path:
     return get_zephyr_tools_path() / "frameworks" / f"{sdk.workspace_prefix}-{version}"
+
+
+def build_workspace() -> tuple[ZephyrSDK, str]:
+    """The SDK this build installs and the version its workspace is installed at;
+    the install and every reader of the workspace take it from here."""
+    # deferred: zephyr's __init__ may import this module
+    from . import zephyr_framework_type, zephyr_variant
+
+    _, sdk = resolve_sdk(VARIANTS[zephyr_variant()], zephyr_framework_type())
+    return sdk, f"v{CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION]}"
+
+
+def get_zephyr_base() -> Path:
+    """This build's workspace's zephyr/ folder, Zephyr's ZEPHYR_BASE."""
+    return _get_framework_path(*build_workspace()) / "zephyr"
 
 
 def check_and_install(sdk: ZephyrSDK, version: str, hals: frozenset[str]) -> None:

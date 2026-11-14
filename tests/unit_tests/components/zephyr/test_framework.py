@@ -11,8 +11,10 @@ import platformdirs
 import pytest
 
 from esphome.components.zephyr import framework, framework_helpers, sdk_install
-from esphome.components.zephyr.variants import ZEPHYR_MAINLINE
-from esphome.core import EsphomeError
+from esphome.components.zephyr.variants import ZEPHYR_MAINLINE, set_core_data
+import esphome.config_validation as cv
+from esphome.const import CONF_BOARD, CONF_FRAMEWORK, KEY_CORE
+from esphome.core import CORE, EsphomeError
 
 TOOLCHAIN: str = "riscv64-zephyr-elf"
 
@@ -319,3 +321,18 @@ def test_install_toolchain_removes_only_stale_partial_downloads(
     assert not stale_meta.exists()
     assert fresh.exists()
     assert fresh_meta.exists()
+
+
+def test_zephyr_base_is_the_installed_workspace(workspace: Path) -> None:
+    """The devicetree readers and the install name the same workspace."""
+    CORE.data[KEY_CORE] = {}
+    set_core_data(
+        "STM32C5",
+        {CONF_BOARD: "nucleo_c5a3zg", CONF_FRAMEWORK: {}},
+        cv.Version(4, 5, 0),
+        framework_type="zephyr",
+        bootloader="",
+    )
+
+    assert framework.build_workspace() == (ZEPHYR_MAINLINE, VERSION)
+    assert framework.get_zephyr_base() == workspace / "zephyr"
