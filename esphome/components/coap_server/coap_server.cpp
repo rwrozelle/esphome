@@ -840,7 +840,8 @@ uint16_t CoapServer::format_link_entry(char *buf, size_t buf_len, const LinkForm
   }
   if (res.entity != nullptr) {
     put(";title=\"", sizeof(";title=\"") - 1);
-    const auto &name = res.entity->get_name();
+    char name_buf[ENTITY_NAME_BUF_SIZE];
+    const StringRef name = res.entity->get_name_to(name_buf);
     put(name.c_str(), name.size());
     put("\";oid=", sizeof("\";oid=") - 1);
     char hash_buf[11];

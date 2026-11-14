@@ -194,10 +194,10 @@ size_t CoapServer::cbor_output_(uint8_t *buffer, size_t buf_len, EntityBase *ent
   if (err != CBOR_NO_ERROR) {
     if (err == CBOR_ERROR_OUT_OF_MEMORY && entity != nullptr) {
       ESP_LOGE(TAG, "CBOR encode: state of '%s' exceeds %u-byte buffer — truncated to nothing",
-               entity->get_name().c_str(), (unsigned) buf_len);
+               LOG_STR_ARG(entity->get_log_name()), (unsigned) buf_len);
     } else {
       ESP_LOGE(TAG, "CBOR encode error %d for entity '%s'", err,
-               entity != nullptr ? entity->get_name().c_str() : LOG_STR_LITERAL("?"));
+               entity != nullptr ? LOG_STR_ARG(entity->get_log_name()) : LOG_STR_LITERAL("?"));
     }
     return 0;
   }
