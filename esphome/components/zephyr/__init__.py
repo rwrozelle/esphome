@@ -7,11 +7,18 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BOARD,
+    CONF_FRAMEWORK,
+    CONF_TOOLCHAIN,
+    CONF_TYPE,
+    CONF_VARIANT,
+    CONF_VERSION,
     KEY_CORE,
     KEY_FRAMEWORK_VERSION,
     KEY_TARGET_PLATFORM,
+    Toolchain,
 )
 from esphome.core import CORE, CoroPriority, coroutine_with_priority
+from esphome.core.config import BOARD_MAX_LENGTH
 from esphome.helpers import copy_file_if_changed, write_file_if_changed
 from esphome.types import ConfigType
 from esphome.writer import clean_cmake_cache
@@ -154,6 +161,56 @@ def zephyr_variant_family() -> str | None:
 def zephyr_framework_type() -> str | None:
     """The active `framework: type:`, e.g. "zephyr"; None outside the variants registry."""
     return _variant_data().get(KEY_FRAMEWORK_TYPE)
+
+
+# `type:` and `version:` are checked by the variant's config_schema, which knows
+# its SDKs; see resolve_framework_version()
+_FRAMEWORK_SCHEMA: cv.Schema = cv.Schema(
+    {
+        cv.Optional(CONF_TYPE): cv.string_strict,
+        # "recommended" is the SDK's default version, the same as leaving it out
+        cv.Optional(CONF_VERSION): cv.string_strict,
+    }
+)
+
+
+def zephyr_toolchain_schema(families: frozenset[str]) -> cv.Schema:
+    """The <platform>: schema of a Zephyr toolchain build, limited to the variants
+    of ``families``."""
+    # deferred: the variants package imports this one
+    from .variants import VARIANTS  # noqa: PLC0415
+
+    return cv.Schema(
+        {
+            cv.Required(CONF_VARIANT): cv.one_of(
+                *(
+                    name
+                    for name, variant in VARIANTS.items()
+                    if variant.family in families
+                ),
+                upper=True,
+            ),
+            cv.Optional(CONF_BOARD): cv.All(
+                cv.string_strict, cv.ByteLength(max=BOARD_MAX_LENGTH)
+            ),
+            cv.Optional(CONF_FRAMEWORK, default={}): _FRAMEWORK_SCHEMA,
+            # Zephyr is the only one; accepted as on nrf52
+            cv.Optional(CONF_TOOLCHAIN): cv.toolchain_enum((Toolchain.ZEPHYR,)),
+        }
+    )
+
+
+def zephyr_config_schema(
+    config: ConfigType, families: frozenset[str], platform: str
+) -> ConfigType:
+    """Validate a <platform>: block whose variants come from ``families``; the
+    variant's own config_schema then sets the Zephyr data."""
+    # deferred: the variants package imports this one
+    from .variants import get_variant_module  # noqa: PLC0415
+
+    CORE.data[KEY_CORE][KEY_TARGET_PLATFORM] = platform
+    config = zephyr_toolchain_schema(families)(config)
+    return get_variant_module(config[CONF_VARIANT]).config_schema(config)
 
 
 def zephyr_add_prj_conf(
