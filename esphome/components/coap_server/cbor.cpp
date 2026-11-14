@@ -1,6 +1,7 @@
 // CBOR parser implementation per RFC 8949.
 
 #include "cbor.h"
+#include <climits>
 #include <cmath>
 
 namespace esphome::coap_server {
@@ -41,8 +42,11 @@ static CborError read_head(const uint8_t **pp, const uint8_t *end, uint64_t *val
   return CBOR_NO_ERROR;
 }
 
+// Containers nested deeper than this are rejected, so a crafted payload cannot exhaust the stack
+static constexpr uint8_t MAX_NESTING = 1;
+
 // Skip one complete data item at *pp, including any nested items.
-static CborError skip_item(const uint8_t **pp, const uint8_t *end) {
+static CborError skip_item(const uint8_t **pp, const uint8_t *end, uint8_t depth = 0) {
   const uint8_t *p = *pp;
   if (p >= end)
     return CBOR_ERROR_UNEXPECTED_EOF;
@@ -57,20 +61,32 @@ static CborError skip_item(const uint8_t **pp, const uint8_t *end) {
       break;
     case 2:  // byte string — val payload bytes follow
     case 3:  // text string — val payload bytes follow
-      if (p + val > end)
+      // Compared as a length: p + val can wrap around for a huge val
+      if (val > (uint64_t) (end - p))
         return CBOR_ERROR_UNEXPECTED_EOF;
       p += val;
       break;
     case 4:  // array — val items follow
+      if (depth >= MAX_NESTING)
+        return CBOR_ERROR_NESTING_TOO_DEEP;
+      // Every item takes at least one byte
+      if (val > (uint64_t) (end - p))
+        return CBOR_ERROR_UNEXPECTED_EOF;
       for (uint64_t i = 0; i < val; i++) {
-        err = skip_item(&p, end);
+        err = skip_item(&p, end, depth + 1);
         if (err != CBOR_NO_ERROR)
           return err;
       }
       break;
-    case 5:  // map — val key-value pairs follow (2*val items)
-      for (uint64_t i = 0; i < val * 2; i++) {
-        err = skip_item(&p, end);
+    case 5:  // map — val key-value pairs follow
+      if (depth >= MAX_NESTING)
+        return CBOR_ERROR_NESTING_TOO_DEEP;
+      if (val > (uint64_t) (end - p))
+        return CBOR_ERROR_UNEXPECTED_EOF;
+      for (uint64_t i = 0; i < val; i++) {
+        err = skip_item(&p, end, depth + 1);
+        if (err == CBOR_NO_ERROR)
+          err = skip_item(&p, end, depth + 1);
         if (err != CBOR_NO_ERROR)
           return err;
       }
@@ -104,6 +120,9 @@ CborError cbor_value_enter_container(const CborValue *value, CborValue *child) {
   CborError err = read_head(&p, value->parser->end, &count);
   if (err != CBOR_NO_ERROR)
     return err;
+  // Every item takes at least one byte; this also keeps count * 2 below from overflowing
+  if (count > (uint64_t) (value->parser->end - p))
+    return CBOR_ERROR_UNEXPECTED_EOF;
   child->parser = value->parser;
   child->ptr = p;
   // maps have count key-value pairs = 2*count items; arrays have count items
@@ -132,6 +151,9 @@ CborError cbor_value_get_int64(const CborValue *value, int64_t *result) {
   CborError err = read_head(&p, value->parser->end, &v);
   if (err != CBOR_NO_ERROR)
     return err;
+  // Both signs encode a magnitude up to 2^64 - 1; int64_t holds up to INT64_MAX either way
+  if (v > (uint64_t) INT64_MAX)
+    return CBOR_ERROR_DATA_TOO_LARGE;
   *result = (mt == 0) ? (int64_t) v : (-1 - (int64_t) v);
   return CBOR_NO_ERROR;
 }
@@ -141,6 +163,8 @@ CborError cbor_value_get_int(const CborValue *value, int *result) {
   CborError err = cbor_value_get_int64(value, &v);
   if (err != CBOR_NO_ERROR)
     return err;
+  if (v < INT_MIN || v > INT_MAX)
+    return CBOR_ERROR_DATA_TOO_LARGE;
   *result = (int) v;
   return CBOR_NO_ERROR;
 }

@@ -661,15 +661,22 @@ void CoapServer::log_append_entry_(uint8_t level, const char *tag, const char *m
   uint8_t entry_buf[320];
   CborEncoder enc, arr;
   cbor_encoder_init(&enc, entry_buf, sizeof(entry_buf), 0);
-  cbor_encoder_create_array(&enc, &arr, 4);
-  cbor_encode_uint(&arr, millis());
-  cbor_encode_uint(&arr, level);
-  cbor_encode_text_stringz(&arr, tag != nullptr ? tag : "");
-  cbor_encode_text_string(&arr, message, message_len);
+  if (cbor_encoder_create_array(&enc, &arr, 4) != CBOR_NO_ERROR || cbor_encode_uint(&arr, millis()) != CBOR_NO_ERROR ||
+      cbor_encode_uint(&arr, level) != CBOR_NO_ERROR ||
+      cbor_encode_text_stringz(&arr, tag != nullptr ? tag : "") != CBOR_NO_ERROR)
+    return;
+  // A long message is cut to fit, at a UTF-8 character boundary so the text stays valid
+  const size_t avail = (size_t) (arr.end - arr.ptr);
+  const size_t max_len = avail > 3 ? avail - 3 : 0;  // 3 = text header for up to 65535 bytes
+  if (message_len > max_len) {
+    message_len = max_len;
+    while (message_len > 0 && (static_cast<uint8_t>(message[message_len]) & 0xC0) == 0x80)
+      message_len--;
+  }
+  if (cbor_encode_text_string(&arr, message, message_len) != CBOR_NO_ERROR)
+    return;
   cbor_encoder_close_container(&enc, &arr);
   size_t entry_size = cbor_encoder_get_buffer_size(&enc, entry_buf);
-  if (entry_size > sizeof(entry_buf))
-    return;
 
   LockGuard guard(this->log_mutex_);
   if (this->log_buf_pos_ + entry_size + 1 > LOG_BUF_SIZE)

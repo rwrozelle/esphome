@@ -276,6 +276,33 @@ TEST(EntityCommands, InvalidValueItemIgnored) {
   EXPECT_EQ(srv.response_code(), 0x44u);
 }
 
+TEST(EntityCommands, KeyOutOfIntRangeIgnored) {
+  TestSwitch sw;
+  sw.configure("sw");
+  CommandServer srv(ENTITYTYPE_SWITCH, &sw);
+  const uint8_t payload[] = {0xA1, 0x1B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0xF5};  // {2^32 + 4: true}
+
+  srv.post("fp/1/g/1", payload, sizeof(payload));
+
+  EXPECT_FALSE(sw.state);
+}
+
+TEST(EntityCommands, DeeplyNestedValueIgnored) {
+  TestSwitch sw;
+  sw.configure("sw");
+  CommandServer srv(ENTITYTYPE_SWITCH, &sw);
+  // {1: [[[...]]], 4: true} with the array nested 200 deep; parsing stops at the nested value
+  std::vector<uint8_t> payload{0xA2, 0x01};
+  payload.insert(payload.end(), 200, 0x81);
+  payload.push_back(0x01);
+  payload.insert(payload.end(), {0x04, 0xF5});
+
+  srv.post("fp/1/g/1", payload.data(), payload.size());
+
+  EXPECT_FALSE(sw.state);
+  EXPECT_EQ(srv.response_code(), 0x44u);
+}
+
 TEST(EntityCommands, EmptyPayloadIgnored) {
   TestSwitch sw;
   sw.configure("sw");

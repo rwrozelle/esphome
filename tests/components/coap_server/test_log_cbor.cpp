@@ -165,6 +165,49 @@ TEST(LogCbor, TakeClosesArrayAndResets) {
   EXPECT_EQ(srv.take(out), 0u);
 }
 
+TEST(LogCbor, LongMessageIsCut) {
+  LogServer srv;
+  srv.subscribe();
+  const std::string message(400, 'm');
+  srv.log(3, "tag", message.c_str());
+
+  auto entries = srv.buffered();
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_GT(entries[0].message.size(), 0u);
+  EXPECT_LT(entries[0].message.size(), message.size());
+  EXPECT_EQ(message.compare(0, entries[0].message.size(), entries[0].message), 0);
+}
+
+TEST(LogCbor, LongMessageIsCutAtCharacterBoundary) {
+  LogServer srv;
+  srv.subscribe();
+  // One ASCII byte, then 2-byte characters, so some cut points fall inside a character
+  std::string message = "x";
+  for (int i = 0; i < 200; i++)
+    message += "\xC3\xA9";  // é
+  srv.log(3, "tag", message.c_str());
+
+  auto entries = srv.buffered();
+  ASSERT_EQ(entries.size(), 1u);
+  const size_t len = entries[0].message.size();
+  ASSERT_GT(len, 0u);
+  ASSERT_LT(len, message.size());
+  EXPECT_EQ(message.compare(0, len, entries[0].message), 0);
+  EXPECT_NE(static_cast<uint8_t>(message[len]) & 0xC0, 0x80);  // the cut is not inside a character
+}
+
+TEST(LogCbor, LongMessageKeepsLaterEntriesReadable) {
+  LogServer srv;
+  srv.subscribe();
+  const std::string message(400, 'm');
+  srv.log(3, "tag", message.c_str());
+  srv.log(3, "tag", "after");
+
+  auto entries = srv.buffered();
+  ASSERT_EQ(entries.size(), 2u);
+  EXPECT_EQ(entries[1].message, "after");
+}
+
 TEST(LogCbor, FullBufferDropsNewEntries) {
   LogServer srv;
   srv.subscribe();

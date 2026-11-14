@@ -278,6 +278,130 @@ TEST(CborParserErrors, AdvancePastEnd) {
   EXPECT_NE(cbor_value_advance(&v), CBOR_NO_ERROR);  // remaining=0 → error
 }
 
+TEST(CborParserErrors, AdvanceTruncatedString) {
+  uint8_t buf[] = {0x63, 'a', 'b'};  // text string of 3 bytes with only 2 present
+  CborParser p;
+  CborValue v;
+  cbor_parser_init(buf, sizeof(buf), 0, &p, &v);
+  EXPECT_NE(cbor_value_advance(&v), CBOR_NO_ERROR);
+  EXPECT_EQ(v.ptr, buf);
+}
+
+TEST(CborParserErrors, AdvanceStringLengthThatWrapsPointer) {
+  // byte string whose 64-bit length makes ptr + length wrap around to before the buffer
+  uint8_t buf[] = {0x5B, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF0};
+  CborParser p;
+  CborValue v;
+  cbor_parser_init(buf, sizeof(buf), 0, &p, &v);
+  EXPECT_NE(cbor_value_advance(&v), CBOR_NO_ERROR);
+  EXPECT_EQ(v.ptr, buf);
+}
+
+TEST(CborParserErrors, AdvanceNestedToLimit) {
+  uint8_t buf[] = {0x81, 0x01};  // [1], 1 level
+  CborParser p;
+  CborValue v;
+  cbor_parser_init(buf, sizeof(buf), 0, &p, &v);
+  EXPECT_EQ(cbor_value_advance(&v), CBOR_NO_ERROR);
+  EXPECT_EQ(v.ptr, buf + sizeof(buf));
+}
+
+TEST(CborParserErrors, AdvanceArrayNestedTooDeep) {
+  uint8_t buf[] = {0x81, 0x81, 0x01};  // [[1]], 2 levels
+  CborParser p;
+  CborValue v;
+  cbor_parser_init(buf, sizeof(buf), 0, &p, &v);
+  EXPECT_EQ(cbor_value_advance(&v), CBOR_ERROR_NESTING_TOO_DEEP);
+  EXPECT_EQ(v.ptr, buf);
+}
+
+TEST(CborParserErrors, AdvanceMapNestedTooDeep) {
+  uint8_t buf[] = {0xA1, 0x01, 0xA1, 0x01, 0x01};  // {1: {1: 1}}, 2 levels
+  CborParser p;
+  CborValue v;
+  cbor_parser_init(buf, sizeof(buf), 0, &p, &v);
+  EXPECT_EQ(cbor_value_advance(&v), CBOR_ERROR_NESTING_TOO_DEEP);
+  EXPECT_EQ(v.ptr, buf);
+}
+
+TEST(CborParserErrors, AdvanceMapCountThatOverflows) {
+  // map with 2^63 pairs: 2 * count wraps to 0, which used to skip it as an empty map
+  uint8_t buf[] = {0xBB, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  CborParser p;
+  CborValue v;
+  cbor_parser_init(buf, sizeof(buf), 0, &p, &v);
+  EXPECT_EQ(cbor_value_advance(&v), CBOR_ERROR_UNEXPECTED_EOF);
+  EXPECT_EQ(v.ptr, buf);
+}
+
+TEST(CborParserErrors, AdvanceArrayCountLargerThanData) {
+  uint8_t buf[] = {0x9A, 0xFF, 0xFF, 0xFF, 0xFF, 0x01};  // array of 2^32 - 1 items, one present
+  CborParser p;
+  CborValue v;
+  cbor_parser_init(buf, sizeof(buf), 0, &p, &v);
+  EXPECT_EQ(cbor_value_advance(&v), CBOR_ERROR_UNEXPECTED_EOF);
+  EXPECT_EQ(v.ptr, buf);
+}
+
+TEST(CborParserErrors, AdvanceMapSkipsPairs) {
+  uint8_t buf[] = {0xA2, 0x01, 0xF5, 0x02, 0xF4, 0x07};  // {1: true, 2: false} then 7
+  CborParser p;
+  CborValue v;
+  cbor_parser_init(buf, sizeof(buf), 0, &p, &v);
+  ASSERT_EQ(cbor_value_advance(&v), CBOR_NO_ERROR);
+  EXPECT_EQ(v.ptr, buf + 5);
+}
+
+TEST(CborParserErrors, EnterContainerCountLargerThanData) {
+  uint8_t buf[] = {0xBB, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};  // map with 2^63 pairs
+  CborParser p;
+  CborValue v, child;
+  cbor_parser_init(buf, sizeof(buf), 0, &p, &v);
+  EXPECT_EQ(cbor_value_enter_container(&v, &child), CBOR_ERROR_UNEXPECTED_EOF);
+}
+
+TEST(CborParserErrors, GetInt64Limits) {
+  CborParser p;
+  CborValue v;
+  int64_t result;
+  uint8_t max_pos[] = {0x1B, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};  // INT64_MAX
+  cbor_parser_init(max_pos, sizeof(max_pos), 0, &p, &v);
+  ASSERT_EQ(cbor_value_get_int64(&v, &result), CBOR_NO_ERROR);
+  EXPECT_EQ(result, INT64_MAX);
+  uint8_t max_neg[] = {0x3B, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};  // INT64_MIN
+  cbor_parser_init(max_neg, sizeof(max_neg), 0, &p, &v);
+  ASSERT_EQ(cbor_value_get_int64(&v, &result), CBOR_NO_ERROR);
+  EXPECT_EQ(result, INT64_MIN);
+}
+
+TEST(CborParserErrors, GetInt64TooLarge) {
+  CborParser p;
+  CborValue v;
+  int64_t result;
+  uint8_t too_pos[] = {0x1B, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};  // 2^63
+  cbor_parser_init(too_pos, sizeof(too_pos), 0, &p, &v);
+  EXPECT_EQ(cbor_value_get_int64(&v, &result), CBOR_ERROR_DATA_TOO_LARGE);
+  uint8_t too_neg[] = {0x3B, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};  // -1 - 2^63
+  cbor_parser_init(too_neg, sizeof(too_neg), 0, &p, &v);
+  EXPECT_EQ(cbor_value_get_int64(&v, &result), CBOR_ERROR_DATA_TOO_LARGE);
+}
+
+TEST(CborParserErrors, GetIntOutOfRange) {
+  CborParser p;
+  CborValue v;
+  int result = 0;
+  uint8_t wraps_to_4[] = {0x1B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04};  // 2^32 + 4
+  cbor_parser_init(wraps_to_4, sizeof(wraps_to_4), 0, &p, &v);
+  EXPECT_EQ(cbor_value_get_int(&v, &result), CBOR_ERROR_DATA_TOO_LARGE);
+  uint8_t below_min[] = {0x3A, 0x80, 0x00, 0x00, 0x00};  // INT_MIN - 1
+  cbor_parser_init(below_min, sizeof(below_min), 0, &p, &v);
+  EXPECT_EQ(cbor_value_get_int(&v, &result), CBOR_ERROR_DATA_TOO_LARGE);
+  uint8_t at_min[] = {0x3A, 0x7F, 0xFF, 0xFF, 0xFF};  // INT_MIN
+  cbor_parser_init(at_min, sizeof(at_min), 0, &p, &v);
+  ASSERT_EQ(cbor_value_get_int(&v, &result), CBOR_NO_ERROR);
+  EXPECT_EQ(result, INT_MIN);
+}
+
 TEST(CborParserErrors, AtEndOnEmptyBuffer) {
   uint8_t buf[1]{};
   CborParser p;

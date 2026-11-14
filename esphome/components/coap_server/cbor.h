@@ -16,6 +16,8 @@ enum CborError {
   CBOR_ERROR_UNEXPECTED_EOF,
   CBOR_ERROR_ILLEGAL_TYPE,
   CBOR_ERROR_OUT_OF_MEMORY,
+  CBOR_ERROR_NESTING_TOO_DEEP,
+  CBOR_ERROR_DATA_TOO_LARGE,
 };
 
 // ---------------------------------------------------------------------------
