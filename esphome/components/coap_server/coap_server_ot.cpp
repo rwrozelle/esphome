@@ -766,17 +766,22 @@ exit:
 }  // handle_ping_request
 
 void CoapServerOT::shrink_observers() {
-  LockGuard lock(this->lock_);
-  ehCoapObserver *cur = this->free_observers_;
-  while (cur != nullptr) {
-    ehCoapObserver *next = cur->next;
-    delete cur;
-    this->observer_nodes_--;
-    cur = next;
+  uint8_t active_count;
+  {
+    LockGuard lock(this->lock_);
+    ehCoapObserver *cur = this->free_observers_;
+    while (cur != nullptr) {
+      ehCoapObserver *next = cur->next;
+      delete cur;
+      this->observer_nodes_--;
+      cur = next;
+    }
+    this->free_observers_ = nullptr;
+    this->high_water_mark_ = this->active_count_;
+    active_count = this->active_count_;
   }
-  this->free_observers_ = nullptr;
-  this->high_water_mark_ = this->active_count_;
-  ESP_LOGD(TAG, "Observer pool shrunk, high water mark reset to %" PRIu8, this->active_count_);
+  // Logged outside lock_: on the main loop the log callback runs at once and takes lock_
+  ESP_LOGD(TAG, "Observer pool shrunk, high water mark reset to %" PRIu8, active_count);
 }
 
 void CoapServerOT::republish_all() {
@@ -1229,18 +1234,23 @@ void CoapServerOT::notify_observers_(ehCoapResource *resource, const uint8_t *pa
   // One observer per client per resource at most, so USE_COAP_SERVER_MAX_CLIENTS is a tight bound.
   Pending pending[USE_COAP_SERVER_MAX_CLIENTS];
   size_t pending_count = 0;
+  size_t skipped = 0;
   {
     LockGuard lock(this->lock_);
     for (ehCoapObserver *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
       if (obs->resource == resource) {
-        ESP_LOGV(TAG, "Found Observer: /%s", resource->path);
         if (pending_count < USE_COAP_SERVER_MAX_CLIENTS) {
           pending[pending_count++] = {obs, obs->resource};
         } else {
-          ESP_LOGW(TAG, "Observer notify limit reached, skipping");
+          skipped++;
         }
       }
     }
+  }
+  // Logged outside lock_: on the main loop the log callback runs at once and takes lock_
+  ESP_LOGV(TAG, "Found %u observers: /%s", (unsigned) (pending_count + skipped), resource->path);
+  if (skipped > 0) {
+    ESP_LOGW(TAG, "Observer notify limit reached, skipped %u", (unsigned) skipped);
   }
   for (size_t i = 0; i < pending_count; i++)
     this->handle_observer_(pending[i].observer, pending[i].resource, payload, payload_len);
