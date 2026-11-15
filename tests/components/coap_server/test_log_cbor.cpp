@@ -99,14 +99,22 @@ TEST(LogCbor, SubscribeAnswersWithEmptyArray) {
 TEST(LogCbor, SubscribeAtCapAnsweredWithoutObserve) {
   LogServer srv;
   for (uint16_t port = 1; port <= USE_COAP_SERVER_MAX_CLIENTS; port++)
-    srv.inject(make_coap_get(srv.logs_path(), port, 0), make_peer(port));
+    srv.inject(make_coap_get(srv.logs_path(), port, 0), make_client_peer(port));
 
-  srv.inject(make_coap_get(srv.logs_path(), 100, 0), make_peer(100));
+  srv.inject(make_coap_get(srv.logs_path(), 100, 0), make_client_peer(100));
 
   ASSERT_GT(srv.last_sent.size(), 5u);
   EXPECT_EQ(srv.last_sent[1], 0x45u);
   EXPECT_NE(srv.last_sent[5] >> 4, 6);  // first option is not Observe
   EXPECT_EQ(srv.active_observer_count(), USE_COAP_SERVER_MAX_CLIENTS);
+}
+
+TEST(LogCbor, RestartedClientReplacesLogObserver) {
+  LogServer srv;
+  srv.inject(make_coap_get(srv.logs_path(), 1, 0), make_peer(1000));
+  srv.inject(make_coap_get(srv.logs_path(), 2, 0), make_peer(2000));  // same client, new port
+
+  EXPECT_EQ(srv.active_observer_count(), 1u);
 }
 
 TEST(LogCbor, CopyLeavesBufferInPlace) {

@@ -40,19 +40,21 @@ static socklen_t sockaddr_len(const sockaddr_storage &addr) {
 #endif
 }
 
-static bool addr_equal(const sockaddr_storage &a, const sockaddr_storage &b) {
+// Compares the IP address only; with_port also compares the port
+static bool addr_equal(const sockaddr_storage &a, const sockaddr_storage &b, bool with_port = true) {
   if (a.ss_family != b.ss_family)
     return false;
 #if USE_NETWORK_IPV6
   if (a.ss_family == AF_INET6) {
     const auto &a6 = reinterpret_cast<const sockaddr_in6 &>(a);
     const auto &b6 = reinterpret_cast<const sockaddr_in6 &>(b);
-    return memcmp(&a6.sin6_addr, &b6.sin6_addr, sizeof(a6.sin6_addr)) == 0 && a6.sin6_port == b6.sin6_port;
+    return memcmp(&a6.sin6_addr, &b6.sin6_addr, sizeof(a6.sin6_addr)) == 0 &&
+           (!with_port || a6.sin6_port == b6.sin6_port);
   }
 #endif
   const auto &a4 = reinterpret_cast<const sockaddr_in &>(a);
   const auto &b4 = reinterpret_cast<const sockaddr_in &>(b);
-  return a4.sin_addr.s_addr == b4.sin_addr.s_addr && a4.sin_port == b4.sin_port;
+  return a4.sin_addr.s_addr == b4.sin_addr.s_addr && (!with_port || a4.sin_port == b4.sin_port);
 }
 
 static void addr_to_str(const sockaddr_storage &addr, char *buf, size_t len) {
@@ -589,10 +591,9 @@ void CoapServerNet::handle_entity_request_(const CoapPacket &pkt, const sockaddr
           this->send_response(this->builder_.buf, this->builder_.pos, &peer);
           return;
         }
-        // Deregister stale observer from same client
-        NetCoapObserver *stale = this->get_observer_(pkt.token, pkt.token_len, peer);
+        NetCoapObserver *stale = this->find_observer_(resource, peer);
         if (stale != nullptr) {
-          ESP_LOGD(TAG, "Replace stale observer from restarted client");
+          ESP_LOGD(TAG, "Replace stale observer from restarted client: /%s", resource->path);
           this->free_observer_(stale);
         }
         ESP_LOGD(TAG, "Create Observer: /%s", resource->path);
@@ -1087,6 +1088,14 @@ NetCoapObserver *CoapServerNet::get_observer_(const uint8_t *token, uint8_t toke
   return nullptr;
 }
 
+NetCoapObserver *CoapServerNet::find_observer_(const NetCoapResource *resource, const sockaddr_storage &peer) {
+  for (auto *obs = this->active_observers_; obs != nullptr; obs = obs->next) {
+    if (obs->resource == resource && addr_equal(obs->peer_addr, peer, false))
+      return obs;
+  }
+  return nullptr;
+}
+
 NetCoapObserver *CoapServerNet::new_observer_(NetCoapResource *resource, const sockaddr_storage &peer,
                                               const uint8_t *token, uint8_t token_len, bool is_con) {
   NetCoapObserver *obs;
@@ -1234,7 +1243,7 @@ void CoapServerNet::handle_logs_request_(const CoapPacket &pkt, const sockaddr_s
       this->send_response(this->builder_.buf, this->builder_.pos, &peer);
       return;
     }
-    NetCoapObserver *stale = this->get_observer_(pkt.token, pkt.token_len, peer);
+    NetCoapObserver *stale = this->find_observer_(this->logs_resource_, peer);
     if (stale != nullptr)
       this->free_observer_(stale);
     observer = this->new_observer_(this->logs_resource_, peer, pkt.token, pkt.token_len, is_con);

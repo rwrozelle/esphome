@@ -194,6 +194,9 @@ class CoapServerNet : public CoapServer {
   void cancel_ping_client_(NetCoapClient *client);
 
   NetCoapObserver *get_observer_(const uint8_t *token, uint8_t token_len, const sockaddr_storage &peer);
+  // The observer of resource from peer's IP address, whatever its port: a restarted client registers from a new
+  // port, and its old observer would otherwise hold a slot for good
+  NetCoapObserver *find_observer_(const NetCoapResource *resource, const sockaddr_storage &peer);
   NetCoapObserver *new_observer_(NetCoapResource *resource, const sockaddr_storage &peer, const uint8_t *token,
                                  uint8_t token_len, bool is_con);
   void free_observer_(NetCoapObserver *observer);

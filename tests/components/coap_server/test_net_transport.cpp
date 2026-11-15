@@ -788,10 +788,10 @@ TEST(CoapServerNetObserverLimit, RefusedAtCapAnsweredWithoutObserve) {
   srv.add_resource(ENTITYTYPE_SENSOR, &s, true, idx);
 
   for (uint16_t port = 1; port <= USE_COAP_SERVER_MAX_CLIENTS; port++) {
-    srv.inject(make_coap_get("fp/1/g/1", port, 0), make_peer(port));
+    srv.inject(make_coap_get("fp/1/g/1", port, 0), make_client_peer(port));
     ASSERT_TRUE(response_has_observe(srv.last_sent));
   }
-  srv.inject(make_coap_get("fp/1/g/1", 100, 0), make_peer(100));
+  srv.inject(make_coap_get("fp/1/g/1", 100, 0), make_client_peer(100));
 
   EXPECT_EQ(srv.last_sent[1], 0x45u);  // still answered with the state
   EXPECT_FALSE(response_has_observe(srv.last_sent));
@@ -808,10 +808,29 @@ TEST(CoapServerNetObserverLimit, FreedNodeIsReusedAtCap) {
   uint16_t idx = 1;
   srv.add_resource(ENTITYTYPE_SENSOR, &s, true, idx);
   for (uint16_t port = 1; port <= USE_COAP_SERVER_MAX_CLIENTS; port++)
-    srv.inject(make_coap_get("fp/1/g/1", port, 0), make_peer(port));
+    srv.inject(make_coap_get("fp/1/g/1", port, 0), make_client_peer(port));
 
-  srv.inject(make_coap_get("fp/1/g/1", 50, 1), make_peer(1));  // deregister
-  srv.inject(make_coap_get("fp/1/g/1", 51, 0), make_peer(100));
+  srv.inject(make_coap_get("fp/1/g/1", 50, 1), make_client_peer(1));  // deregister
+  srv.inject(make_coap_get("fp/1/g/1", 51, 0), make_client_peer(100));
+
+  EXPECT_TRUE(response_has_observe(srv.last_sent));
+  EXPECT_EQ(srv.active_observer_count(), USE_COAP_SERVER_MAX_CLIENTS);
+  EXPECT_EQ(srv.observer_nodes(), USE_COAP_SERVER_MAX_CLIENTS);
+}
+
+TEST(CoapServerNetObserverLimit, RestartedClientReplacesObserversAtCap) {
+  TestableCoapServerNet srv;
+  srv.init_resources(2);
+  TestSensor s;
+  s.configure("s");
+  s.state = 1.0f;
+  uint16_t idx = 1;
+  srv.add_resource(ENTITYTYPE_SENSOR, &s, true, idx);
+  for (uint16_t n = 1; n <= USE_COAP_SERVER_MAX_CLIENTS; n++)
+    srv.inject(make_coap_get("fp/1/g/1", n, 0), make_client_peer(n));
+
+  // Client 1 restarts: new port, new token, and its old observer was never cancelled
+  srv.inject(make_coap_get("fp/1/g/1", 77, 0), make_client_peer(1, 40000));
 
   EXPECT_TRUE(response_has_observe(srv.last_sent));
   EXPECT_EQ(srv.active_observer_count(), USE_COAP_SERVER_MAX_CLIENTS);
@@ -827,7 +846,7 @@ TEST(CoapServerNetObserverLimit, RefusedObserverDoesNotTakeAClientSlot) {
   uint16_t idx = 1;
   srv.add_resource(ENTITYTYPE_SENSOR, &s, true, idx);
   for (uint16_t port = 1; port <= USE_COAP_SERVER_MAX_CLIENTS; port++)
-    srv.inject(make_coap_get("fp/1/g/1", port, 0), make_peer(port));
+    srv.inject(make_coap_get("fp/1/g/1", port, 0), make_client_peer(port));
   const uint8_t clients = srv.get_active_client_count();
 
   sockaddr_storage other = make_peer_ipv4("127.0.0.2", 100);

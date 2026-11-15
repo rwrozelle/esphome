@@ -271,6 +271,16 @@ inline sockaddr_storage make_peer(uint16_t port = 12345) {
   return ss;
 }
 
+// Client n on its own IPv6 address; the server tells clients apart by address, not port
+inline sockaddr_storage make_client_peer(uint16_t n, uint16_t port = 12345) {
+  sockaddr_storage ss = make_peer(port);
+  auto &p = reinterpret_cast<sockaddr_in6 &>(ss);
+  p.sin6_addr.s6_addr[0] = 0xfd;
+  p.sin6_addr.s6_addr[14] = n >> 8;
+  p.sin6_addr.s6_addr[15] = n & 0xFF;
+  return ss;
+}
+
 inline sockaddr_storage make_peer_ipv4(const char *addr = "127.0.0.1", uint16_t port = 12345) {
   sockaddr_storage ss{};
   auto &p = reinterpret_cast<sockaddr_in &>(ss);
