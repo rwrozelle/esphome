@@ -568,6 +568,8 @@ def test_preprocess_dts_file_runs_cpp_with_the_include_folders(
             "-x",
             "assembler-with-cpp",
             "-nostdinc",
+            "-undef",
+            "-D__DTS__",
             "-E",
             "-P",
             "-I",

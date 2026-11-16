@@ -251,7 +251,9 @@ def _find_dts_file(board_dir: Path, board: str) -> Path | None:
 
 def _cpp_command(cpp: str, include_dirs: list[str], src_file: Path) -> list[str]:
     """The preprocessor command, shared by the real run and the candidate check."""
-    cmd = [cpp, "-x", "assembler-with-cpp", "-nostdinc", "-E", "-P"]
+    # -undef and -D__DTS__ as Zephyr's build: no host macros such as linux=1
+    cmd = [cpp, "-x", "assembler-with-cpp", "-nostdinc", "-undef", "-D__DTS__"]
+    cmd += ["-E", "-P"]
     for d in include_dirs:
         cmd += ["-I", d]
     cmd.append(str(src_file))
