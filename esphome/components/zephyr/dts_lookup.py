@@ -444,21 +444,29 @@ def resolve_uart_node_label(board: str, hw_uart: str) -> str:
 
 
 def get_watchdog_node_label(board: str) -> tuple[str | None, bool]:
-    """``(label, already_working)`` for the board's watchdog. Found by its binding
-    being in Zephyr's bindings/watchdog/ folder, so every vendor is covered;
-    already_working is True when an enabled node already has the watchdog0 alias."""
+    """``(label, already_working)`` for the board's watchdog: the node its watchdog0
+    alias names, even if disabled, or else a node whose binding is in Zephyr's
+    bindings/watchdog/ folder, enabled ones first. already_working is True when the
+    aliased node is enabled."""
     edt = _get_edt(board)
     if edt is None:
         return None, False
+    aliased = None
     for node in _iter_nodes(edt):
-        if "watchdog0" in node.aliases and node.status == "okay":
-            return (node.labels[0] if node.labels else None), True
-    for node in _iter_nodes(edt):
-        binding_path = node.binding_path
-        if (
-            binding_path
-            and Path(binding_path).parent.name == "watchdog"
-            and node.labels
-        ):
-            return node.labels[0], False
-    return None, False
+        if "watchdog0" in node.aliases:
+            if node.status == "okay":
+                return (node.labels[0] if node.labels else None), True
+            aliased = node
+    # The board's own choice, though disabled, before any guess
+    if aliased is not None and aliased.labels:
+        return aliased.labels[0], False
+    watchdogs = [
+        node
+        for node in _iter_nodes(edt)
+        if node.binding_path
+        and Path(node.binding_path).parent.name == "watchdog"
+        and node.labels
+    ]
+    # Enabled ones first; sort() keeps devicetree order otherwise
+    watchdogs.sort(key=lambda node: node.status != "okay")
+    return (watchdogs[0].labels[0], False) if watchdogs else (None, False)

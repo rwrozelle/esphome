@@ -911,6 +911,27 @@ _WDT_BINDING: str = "/zephyr/dts/bindings/watchdog/st,stm32-window-watchdog.yaml
             ],
             ("wwdg", False),
         ),
+        # The board's alias wins over a guess even when its node is disabled
+        (
+            [
+                _FakeNode(["wdt30"], status="disabled", binding_path=_WDT_BINDING),
+                _FakeNode(
+                    ["wdt31"],
+                    status="disabled",
+                    aliases=["watchdog0"],
+                    binding_path=_WDT_BINDING,
+                ),
+            ],
+            ("wdt31", False),
+        ),
+        # Without an alias, an enabled watchdog before a disabled one listed first
+        (
+            [
+                _FakeNode(["wwdg"], status="disabled", binding_path=_WDT_BINDING),
+                _FakeNode(["iwdg"], binding_path=_WDT_BINDING),
+            ],
+            ("iwdg", False),
+        ),
         ([_FakeNode(["uart0"])], (None, False)),
     ],
 )
