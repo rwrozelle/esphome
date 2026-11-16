@@ -242,10 +242,12 @@ def test_find_dts_file(
 def test_find_dts_file_falls_back_to_the_only_dts(tmp_path: Path) -> None:
     board_dir = tmp_path / "only_board"
     board_dir.mkdir()
-    (board_dir / "only_board_defconfig.dts").write_text("")
     assert _find_dts_file(board_dir, "other_name/soc") is None
     (board_dir / "renamed.dts").write_text("/* only */")
     assert _find_dts_file(board_dir, "other_name/soc") == board_dir / "renamed.dts"
+    # Several: none is guessed
+    (board_dir / "other.dts").write_text("")
+    assert _find_dts_file(board_dir, "other_name/soc") is None
 
 
 @pytest.mark.parametrize(
@@ -365,14 +367,14 @@ def test_get_edt_merges_the_revision_overlay(
     assert left_out not in edt_texts[0]
 
 
-def test_get_edt_uses_the_base_tree_for_an_unknown_revision(
-    edt_texts: list[str], zephyr_base: Path
+def test_get_edt_warns_on_an_unknown_revision(
+    edt_texts: list[str], zephyr_base: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     _revisioned_board_dir(zephyr_base)
 
-    _get_edt("actinius_icarus@0.1.0/nrf9160/ns")
-
-    assert edt_texts == ["/* base */"]
+    assert _get_edt("actinius_icarus@0.1.0/nrf9160/ns") is None
+    assert edt_texts == []
+    assert "revision '0.1.0' is not one it declares (1.4.0, 2.0.0)" in caplog.text
 
 
 def test_get_edt_without_the_revision_overlay_file(
@@ -434,7 +436,7 @@ def test_get_edt_warns_once_when_cpp_missing(
         (lambda base: None, "no folder for it under"),
         (
             lambda base: (base / "boards" / "acme" / "my_board").mkdir(parents=True),
-            "no .dts file in",
+            "no .dts file named for it in",
         ),
     ],
 )
@@ -460,6 +462,8 @@ def test_get_edt_warns_when_the_workspace_is_missing(
 
     assert _get_edt("my_board") is None
     assert "is not installed" in caplog.text
+    # Read again once the workspace is installed
+    assert "my_board" not in CORE.data[KEY_ZEPHYR][KEY_BOARD_EDT_CACHE]
 
 
 def test_get_edt_warns_without_the_devicetree_library(
@@ -569,8 +573,9 @@ def test_preprocess_dts_file_runs_cpp_with_the_include_folders(
             "-x",
             "assembler-with-cpp",
             "-nostdinc",
+            "-undef",
+            "-D__DTS__",
             "-E",
-            "-P",
             "-I",
             "/inc",
             "-I",
@@ -685,7 +690,7 @@ def test_cpp_candidate_check_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_dts_include_paths_cover_zephyr_and_the_hal_modules(tmp_path: Path) -> None:
     """Board files #include the SoC files in the vendor's HAL module."""
     base = tmp_path / "zephyr"
-    for sub in ("dts/arm", "dts/bindings", "dts/common"):
+    for sub in ("dts/riscv", "dts/arm", "dts/bindings", "dts/common", "dts/vendor"):
         (base / sub).mkdir(parents=True)
     (base / "dts" / "README").write_text("")
     (tmp_path / "modules" / "hal" / "stm32" / "dts").mkdir(parents=True)
@@ -693,14 +698,17 @@ def test_dts_include_paths_cover_zephyr_and_the_hal_modules(tmp_path: Path) -> N
 
     paths = _get_dts_include_paths(base)
 
-    assert paths[:2] == [str(base / "include"), str(base / "dts")]
-    assert sorted(paths[2:]) == sorted(
-        [
-            str(base / "dts" / "arm"),
-            str(base / "dts" / "common"),
-            str(tmp_path / "modules" / "hal" / "stm32" / "dts"),
-        ]
-    )
+    # Zephyr's order, the arch folders sorted
+    assert paths == [
+        str(base / "include"),
+        str(base / "include" / "zephyr"),
+        str(base / "dts" / "common"),
+        str(base / "dts" / "vendor"),
+        str(base / "dts" / "arm"),
+        str(base / "dts" / "riscv"),
+        str(base / "dts"),
+        str(tmp_path / "modules" / "hal" / "stm32" / "dts"),
+    ]
     # Built once per build
     assert _get_dts_include_paths(tmp_path / "other") is paths
 
@@ -708,7 +716,33 @@ def test_dts_include_paths_cover_zephyr_and_the_hal_modules(tmp_path: Path) -> N
 def test_dts_include_paths_of_a_bare_tree(tmp_path: Path) -> None:
     assert _get_dts_include_paths(tmp_path) == [
         str(tmp_path / "include"),
+        str(tmp_path / "include" / "zephyr"),
         str(tmp_path / "dts"),
+    ]
+
+
+@pytest.mark.skipif(shutil.which("cpp") is None, reason="needs a C preprocessor")
+def test_dts_include_resolves_as_zephyr_does(tmp_path: Path) -> None:
+    """The vendor/ copy of a file both folders hold wins, and dt-bindings/ resolves
+    through include/zephyr, as in Zephyr's build."""
+    base = tmp_path / "zephyr"
+    for folder, text in (("vendor", "vendor"), ("arm", "arm")):
+        (base / "dts" / folder / "nordic").mkdir(parents=True)
+        (base / "dts" / folder / "nordic" / "soc_ns.dtsi").write_text(text)
+    bindings = base / "include" / "zephyr" / "dt-bindings"
+    bindings.mkdir(parents=True)
+    (bindings / "pins.h").write_text("#define PIN 7\n")
+    src = tmp_path / "board.dts"
+    src.write_text(
+        "#include <nordic/soc_ns.dtsi>\n#include <dt-bindings/pins.h>\nPIN\n"
+    )
+
+    out = dts_lookup._preprocess_dts_file(src, base, [])
+
+    # Without the linemarkers, which name the files read
+    assert [ln for ln in out.splitlines() if ln and not ln.startswith("#")] == [
+        "vendor",
+        "7",
     ]
 
 
