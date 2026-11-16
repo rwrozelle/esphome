@@ -369,6 +369,27 @@ def _natural_key(label: str) -> tuple[list[str | int], str]:
     return parts, label
 
 
+def _bus_node_labels(board: str, bus: str) -> list[str] | None:
+    """Labels of the nodes whose binding says ``bus: <bus>``, enabled
+    ones first, or None when the devicetree can't be read; vendors name these nodes
+    too differently for a label pattern."""
+    edt = _get_edt(board)
+    if edt is None:
+        return None
+
+    enabled: list[str] = []
+    disabled: list[str] = []
+    for node in _iter_nodes(edt):
+        if bus in node.buses and node.labels:
+            (enabled if node.status == "okay" else disabled).append(node.labels[0])
+
+    result = sorted(set(enabled), key=_natural_key) + sorted(
+        set(disabled) - set(enabled), key=_natural_key
+    )
+    _LOGGER.debug("Nodes with bus '%s' on board '%s': %s", bus, board, result)
+    return result
+
+
 def get_console_uart_label(board: str) -> str | None:
     """The label of the board's ``zephyr,console`` UART, which is UART0, or None."""
     edt = _get_edt(board)
@@ -381,24 +402,9 @@ def get_console_uart_label(board: str) -> str | None:
 
 
 def get_uart_controller_labels(board: str) -> list[str] | None:
-    """The labels of the nodes whose binding says ``bus: uart``, enabled ones first,
-    or None when the devicetree can't be read; vendors name these nodes too
-    differently for a label pattern."""
-    edt = _get_edt(board)
-    if edt is None:
-        return None
-
-    enabled: set[str] = set()
-    disabled: set[str] = set()
-    for node in _iter_nodes(edt):
-        if "uart" in node.buses and node.labels:
-            (enabled if node.status == "okay" else disabled).add(node.labels[0])
-
-    result = sorted(enabled, key=_natural_key) + sorted(
-        disabled - enabled, key=_natural_key
-    )
-    _LOGGER.debug("UARTs on board '%s': %s", board, result)
-    return result
+    """The board's UART labels, enabled ones first, or None when the devicetree
+    can't be read."""
+    return _bus_node_labels(board, "uart")
 
 
 def _discover_uart_node_labels(board: str) -> dict[str, str] | None:
