@@ -687,7 +687,7 @@ def test_cpp_candidate_check_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_dts_include_paths_cover_zephyr_and_the_hal_modules(tmp_path: Path) -> None:
     """Board files #include the SoC files in the vendor's HAL module."""
     base = tmp_path / "zephyr"
-    for sub in ("dts/arm", "dts/bindings", "dts/common"):
+    for sub in ("dts/riscv", "dts/arm", "dts/bindings", "dts/common", "dts/vendor"):
         (base / sub).mkdir(parents=True)
     (base / "dts" / "README").write_text("")
     (tmp_path / "modules" / "hal" / "stm32" / "dts").mkdir(parents=True)
@@ -695,14 +695,17 @@ def test_dts_include_paths_cover_zephyr_and_the_hal_modules(tmp_path: Path) -> N
 
     paths = _get_dts_include_paths(base)
 
-    assert paths[:2] == [str(base / "include"), str(base / "dts")]
-    assert sorted(paths[2:]) == sorted(
-        [
-            str(base / "dts" / "arm"),
-            str(base / "dts" / "common"),
-            str(tmp_path / "modules" / "hal" / "stm32" / "dts"),
-        ]
-    )
+    # Zephyr's order, the arch folders sorted
+    assert paths == [
+        str(base / "include"),
+        str(base / "include" / "zephyr"),
+        str(base / "dts" / "common"),
+        str(base / "dts" / "vendor"),
+        str(base / "dts" / "arm"),
+        str(base / "dts" / "riscv"),
+        str(base / "dts"),
+        str(tmp_path / "modules" / "hal" / "stm32" / "dts"),
+    ]
     # Built once per build
     assert _get_dts_include_paths(tmp_path / "other") is paths
 
@@ -710,7 +713,33 @@ def test_dts_include_paths_cover_zephyr_and_the_hal_modules(tmp_path: Path) -> N
 def test_dts_include_paths_of_a_bare_tree(tmp_path: Path) -> None:
     assert _get_dts_include_paths(tmp_path) == [
         str(tmp_path / "include"),
+        str(tmp_path / "include" / "zephyr"),
         str(tmp_path / "dts"),
+    ]
+
+
+@pytest.mark.skipif(shutil.which("cpp") is None, reason="needs a C preprocessor")
+def test_dts_include_resolves_as_zephyr_does(tmp_path: Path) -> None:
+    """The vendor/ copy of a file both folders hold wins, and dt-bindings/ resolves
+    through include/zephyr, as in Zephyr's build."""
+    base = tmp_path / "zephyr"
+    for folder, text in (("vendor", "vendor"), ("arm", "arm")):
+        (base / "dts" / folder / "nordic").mkdir(parents=True)
+        (base / "dts" / folder / "nordic" / "soc_ns.dtsi").write_text(text)
+    bindings = base / "include" / "zephyr" / "dt-bindings"
+    bindings.mkdir(parents=True)
+    (bindings / "pins.h").write_text("#define PIN 7\n")
+    src = tmp_path / "board.dts"
+    src.write_text(
+        "#include <nordic/soc_ns.dtsi>\n#include <dt-bindings/pins.h>\nPIN\n"
+    )
+
+    out = dts_lookup._preprocess_dts_file(src, base, [])
+
+    # Without the linemarkers, which name the files read
+    assert [ln for ln in out.splitlines() if ln and not ln.startswith("#")] == [
+        "vendor",
+        "7",
     ]
 
 

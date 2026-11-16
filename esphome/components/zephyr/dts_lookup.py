@@ -329,13 +329,17 @@ def _get_dts_include_paths(zephyr_base: Path) -> list[str]:
     zd = CORE.data[KEY_ZEPHYR]
     if zd[KEY_DTS_INCLUDE_PATHS] is None:
         dts_dir = zephyr_base / "dts"
-        paths = [str(zephyr_base / "include"), str(dts_dir)]
+        # Zephyr's order (pre_dt.cmake): vendor/ before the arch folders, dts/ last
+        paths = [str(zephyr_base / "include"), str(zephyr_base / "include" / "zephyr")]
         if dts_dir.is_dir():
+            paths += [str(dts_dir / "common"), str(dts_dir / "vendor")]
             paths.extend(
                 str(subdir)
-                for subdir in dts_dir.iterdir()
-                if subdir.is_dir() and subdir.name != "bindings"
+                for subdir in sorted(dts_dir.iterdir())
+                if subdir.is_dir()
+                and subdir.name not in ("bindings", "common", "vendor")
             )
+        paths.append(str(dts_dir))
         # Some vendors (STM32, NXP, ...) keep SoC and pin devicetree files in their
         # HAL module, which board files #include directly
         hal_dir = zephyr_base.parent / "modules" / "hal"
