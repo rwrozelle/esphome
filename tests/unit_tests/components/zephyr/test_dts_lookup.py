@@ -364,14 +364,14 @@ def test_get_edt_merges_the_revision_overlay(
     assert left_out not in edt_texts[0]
 
 
-def test_get_edt_uses_the_base_tree_for_an_unknown_revision(
-    edt_texts: list[str], zephyr_base: Path
+def test_get_edt_warns_on_an_unknown_revision(
+    edt_texts: list[str], zephyr_base: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     _revisioned_board_dir(zephyr_base)
 
-    _get_edt("actinius_icarus@0.1.0/nrf9160/ns")
-
-    assert edt_texts == ["/* base */"]
+    assert _get_edt("actinius_icarus@0.1.0/nrf9160/ns") is None
+    assert edt_texts == []
+    assert "revision '0.1.0' is not one it declares (1.4.0, 2.0.0)" in caplog.text
 
 
 def test_get_edt_without_the_revision_overlay_file(
@@ -459,6 +459,8 @@ def test_get_edt_warns_when_the_workspace_is_missing(
 
     assert _get_edt("my_board") is None
     assert "is not installed" in caplog.text
+    # Read again once the workspace is installed
+    assert "my_board" not in CORE.data[KEY_ZEPHYR][KEY_BOARD_EDT_CACHE]
 
 
 def test_get_edt_warns_without_the_devicetree_library(
@@ -571,7 +573,6 @@ def test_preprocess_dts_file_runs_cpp_with_the_include_folders(
             "-undef",
             "-D__DTS__",
             "-E",
-            "-P",
             "-I",
             "/inc",
             "-I",

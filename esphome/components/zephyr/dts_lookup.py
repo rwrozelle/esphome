@@ -16,7 +16,12 @@ import yaml
 
 from esphome.core import CORE
 
-from .board_revision import default_revision, parse_board_string, resolve_revision
+from .board_revision import (
+    declared_revisions,
+    default_revision,
+    parse_board_string,
+    resolve_revision,
+)
 from .const import (
     KEY_BOARD_DIR_CACHE,
     KEY_BOARD_EDT_CACHE,
@@ -62,15 +67,18 @@ def _get_edt(board: str) -> Any | None:
         result = cache[board]
         return None if result is _NOT_FOUND else result
 
+    zephyr_base = get_zephyr_base()
     try:
-        edt = _build_edt(board, get_zephyr_base())
+        edt = _build_edt(board, zephyr_base)
     except _DtsReadError as err:
         _LOGGER.warning(
             "Can't read the devicetree of board '%s': %s",
             board,
             err,
         )
-        cache[board] = _NOT_FOUND
+        # A workspace installed later in this build is read then
+        if zephyr_base.is_dir():
+            cache[board] = _NOT_FOUND
         return None
     cache[board] = edt
     return edt
@@ -117,10 +125,9 @@ def _build_edt(board: str, zephyr_base: Path) -> Any:
                     resolved_revision,
                 )
         elif declares_revisions:
-            _LOGGER.debug(
-                "Revision '%s' is not one board '%s' declares; using the base tree",
-                requested_revision,
-                board,
+            raise _DtsReadError(
+                f"revision '{requested_revision}' is not one it declares "
+                f"({', '.join(declared_revisions(board_dir))})"
             )
 
     with tempfile.NamedTemporaryFile(
@@ -252,8 +259,8 @@ def _find_dts_file(board_dir: Path, board: str) -> Path | None:
 def _cpp_command(cpp: str, include_dirs: list[str], src_file: Path) -> list[str]:
     """The preprocessor command, shared by the real run and the candidate check."""
     # -undef and -D__DTS__ as Zephyr's build: no host macros such as linux=1
-    cmd = [cpp, "-x", "assembler-with-cpp", "-nostdinc", "-undef", "-D__DTS__"]
-    cmd += ["-E", "-P"]
+    # No -P: Zephyr keeps the linemarkers so dtlib's errors name the real file
+    cmd = [cpp, "-x", "assembler-with-cpp", "-nostdinc", "-undef", "-D__DTS__", "-E"]
     for d in include_dirs:
         cmd += ["-I", d]
     cmd.append(str(src_file))
