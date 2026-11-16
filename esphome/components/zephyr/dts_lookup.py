@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import logging
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -362,27 +363,10 @@ def _iter_nodes(edt: Any) -> Iterator[Any]:
             yield scc
 
 
-def _lookup_bus_labels_by_property_match(
-    board: str, property_label: str
-) -> list[str] | None:
-    """Labels of the nodes whose binding says ``bus: <property_label>``, enabled
-    ones first, or None when the devicetree can't be read; vendors name these nodes
-    too differently for a label pattern."""
-    edt = _get_edt(board)
-    if edt is None:
-        return None
-
-    enabled: list[str] = []
-    disabled: list[str] = []
-    for node in _iter_nodes(edt):
-        if property_label in node.buses and node.labels:
-            (enabled if node.status == "okay" else disabled).append(node.labels[0])
-
-    result = sorted(set(enabled)) + sorted(set(disabled) - set(enabled))
-    _LOGGER.debug(
-        "Nodes with bus '%s' on board '%s': %s", property_label, board, result
-    )
-    return result
+def _natural_key(label: str) -> tuple[list[str | int], str]:
+    """Numbers compare as numbers, so usart2 comes before usart10."""
+    parts = [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", label)]
+    return parts, label
 
 
 def get_console_uart_label(board: str) -> str | None:
@@ -397,9 +381,24 @@ def get_console_uart_label(board: str) -> str | None:
 
 
 def get_uart_controller_labels(board: str) -> list[str] | None:
-    """The board's UART labels, enabled ones first, or None when the devicetree
-    can't be read."""
-    return _lookup_bus_labels_by_property_match(board, "uart")
+    """The labels of the nodes whose binding says ``bus: uart``, enabled ones first,
+    or None when the devicetree can't be read; vendors name these nodes too
+    differently for a label pattern."""
+    edt = _get_edt(board)
+    if edt is None:
+        return None
+
+    enabled: set[str] = set()
+    disabled: set[str] = set()
+    for node in _iter_nodes(edt):
+        if "uart" in node.buses and node.labels:
+            (enabled if node.status == "okay" else disabled).add(node.labels[0])
+
+    result = sorted(enabled, key=_natural_key) + sorted(
+        disabled - enabled, key=_natural_key
+    )
+    _LOGGER.debug("UARTs on board '%s': %s", board, result)
+    return result
 
 
 def _discover_uart_node_labels(board: str) -> dict[str, str] | None:

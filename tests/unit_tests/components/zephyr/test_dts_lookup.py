@@ -796,17 +796,21 @@ def test_uart_controller_labels_enabled_first(board_edt: Callable[..., None]) ->
     board_edt(
         [
             _uart("usart3", "disabled"),
+            _uart("usart10"),
             _uart("usart2"),
             _uart("lpuart1"),
+            _uart("usart10", "disabled"),
             _uart("usart1", "disabled"),
             # Not a UART, and a UART node without a label
             _FakeNode(["i2c1"], ["i2c"]),
             _FakeNode([], ["uart"]),
         ]
     )
+    # Numbers compare as numbers: usart2 before usart10
     assert get_uart_controller_labels("nucleo_c5a3zg") == [
         "lpuart1",
         "usart2",
+        "usart10",
         "usart1",
         "usart3",
     ]
