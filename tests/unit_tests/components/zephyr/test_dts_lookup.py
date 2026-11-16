@@ -239,10 +239,12 @@ def test_find_dts_file(
 def test_find_dts_file_falls_back_to_the_only_dts(tmp_path: Path) -> None:
     board_dir = tmp_path / "only_board"
     board_dir.mkdir()
-    (board_dir / "only_board_defconfig.dts").write_text("")
     assert _find_dts_file(board_dir, "other_name/soc") is None
     (board_dir / "renamed.dts").write_text("/* only */")
     assert _find_dts_file(board_dir, "other_name/soc") == board_dir / "renamed.dts"
+    # Several: none is guessed
+    (board_dir / "other.dts").write_text("")
+    assert _find_dts_file(board_dir, "other_name/soc") is None
 
 
 @pytest.mark.parametrize(
@@ -431,7 +433,7 @@ def test_get_edt_warns_once_when_cpp_missing(
         (lambda base: None, "no folder for it under"),
         (
             lambda base: (base / "boards" / "acme" / "my_board").mkdir(parents=True),
-            "no .dts file in",
+            "no .dts file named for it in",
         ),
     ],
 )

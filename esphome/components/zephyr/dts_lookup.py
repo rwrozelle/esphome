@@ -93,7 +93,7 @@ def _build_edt(board: str, zephyr_base: Path) -> Any:
 
     dts_file = _find_dts_file(board_dir, board)
     if dts_file is None:
-        raise _DtsReadError(f"no .dts file in {board_dir}")
+        raise _DtsReadError(f"no .dts file named for it in {board_dir}")
 
     # One preprocessor run over every file, as Zephyr's build does: an overlay's
     # macros may only be defined by the base tree's own #includes
@@ -244,10 +244,9 @@ def _find_dts_file(board_dir: Path, board: str) -> Path | None:
     if found is not None:
         return found
 
-    candidates = [
-        f for f in board_dir.glob("*.dts") if not f.name.endswith("_defconfig.dts")
-    ]
-    return candidates[0] if candidates else None
+    # With several, a guess could read another core's tree
+    candidates = list(board_dir.glob("*.dts"))
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _cpp_command(cpp: str, include_dirs: list[str], src_file: Path) -> list[str]:
