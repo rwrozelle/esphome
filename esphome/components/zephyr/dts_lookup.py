@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import logging
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,12 @@ import yaml
 
 from esphome.core import CORE, EsphomeError
 
-from .board_revision import default_revision, parse_board_string, resolve_revision
+from .board_revision import (
+    declared_revisions,
+    default_revision,
+    parse_board_string,
+    resolve_revision,
+)
 from .const import (
     KEY_BOARD_DIR_CACHE,
     KEY_BOARD_EDT_CACHE,
@@ -62,15 +68,18 @@ def _get_edt(board: str) -> Any | None:
         result = cache[board]
         return None if result is _NOT_FOUND else result
 
+    zephyr_base = get_zephyr_base()
     try:
-        edt = _build_edt(board, get_zephyr_base())
+        edt = _build_edt(board, zephyr_base)
     except _DtsReadError as err:
         _LOGGER.warning(
             "Can't read the devicetree of board '%s': %s",
             board,
             err,
         )
-        cache[board] = _NOT_FOUND
+        # A workspace installed later in this build is read then
+        if zephyr_base.is_dir():
+            cache[board] = _NOT_FOUND
         return None
     cache[board] = edt
     return edt
@@ -93,7 +102,7 @@ def _build_edt(board: str, zephyr_base: Path) -> Any:
 
     dts_file = _find_dts_file(board_dir, board)
     if dts_file is None:
-        raise _DtsReadError(f"no .dts file in {board_dir}")
+        raise _DtsReadError(f"no .dts file named for it in {board_dir}")
 
     # One preprocessor run over every file, as Zephyr's build does: an overlay's
     # macros may only be defined by the base tree's own #includes
@@ -117,10 +126,9 @@ def _build_edt(board: str, zephyr_base: Path) -> Any:
                     resolved_revision,
                 )
         elif declares_revisions:
-            _LOGGER.debug(
-                "Revision '%s' is not one board '%s' declares; using the base tree",
-                requested_revision,
-                board,
+            raise _DtsReadError(
+                f"revision '{requested_revision}' is not one it declares "
+                f"({', '.join(declared_revisions(board_dir))})"
             )
 
     with tempfile.NamedTemporaryFile(
@@ -244,15 +252,16 @@ def _find_dts_file(board_dir: Path, board: str) -> Path | None:
     if found is not None:
         return found
 
-    candidates = [
-        f for f in board_dir.glob("*.dts") if not f.name.endswith("_defconfig.dts")
-    ]
-    return candidates[0] if candidates else None
+    # With several, a guess could read another core's tree
+    candidates = list(board_dir.glob("*.dts"))
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _cpp_command(cpp: str, include_dirs: list[str], src_file: Path) -> list[str]:
     """The preprocessor command, shared by the real run and the candidate check."""
-    cmd = [cpp, "-x", "assembler-with-cpp", "-nostdinc", "-E", "-P"]
+    # -undef and -D__DTS__ as Zephyr's build: no host macros such as linux=1
+    # No -P: Zephyr keeps the linemarkers so dtlib's errors name the real file
+    cmd = [cpp, "-x", "assembler-with-cpp", "-nostdinc", "-undef", "-D__DTS__", "-E"]
     for d in include_dirs:
         cmd += ["-I", d]
     cmd.append(str(src_file))
@@ -321,13 +330,17 @@ def _get_dts_include_paths(zephyr_base: Path) -> list[str]:
     zd = CORE.data[KEY_ZEPHYR]
     if zd[KEY_DTS_INCLUDE_PATHS] is None:
         dts_dir = zephyr_base / "dts"
-        paths = [str(zephyr_base / "include"), str(dts_dir)]
+        # Zephyr's order (pre_dt.cmake): vendor/ before the arch folders, dts/ last
+        paths = [str(zephyr_base / "include"), str(zephyr_base / "include" / "zephyr")]
         if dts_dir.is_dir():
+            paths += [str(dts_dir / "common"), str(dts_dir / "vendor")]
             paths.extend(
                 str(subdir)
-                for subdir in dts_dir.iterdir()
-                if subdir.is_dir() and subdir.name != "bindings"
+                for subdir in sorted(dts_dir.iterdir())
+                if subdir.is_dir()
+                and subdir.name not in ("bindings", "common", "vendor")
             )
+        paths.append(str(dts_dir))
         # Some vendors (STM32, NXP, ...) keep SoC and pin devicetree files in their
         # HAL module, which board files #include directly
         hal_dir = zephyr_base.parent / "modules" / "hal"
@@ -350,10 +363,14 @@ def _iter_nodes(edt: Any) -> Iterator[Any]:
             yield scc
 
 
-def _lookup_bus_labels_by_property_match(
-    board: str, property_label: str
-) -> list[str] | None:
-    """Labels of the nodes whose binding says ``bus: <property_label>``, enabled
+def _natural_key(label: str) -> tuple[list[str | int], str]:
+    """Numbers compare as numbers, so usart2 comes before usart10."""
+    parts = [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", label)]
+    return parts, label
+
+
+def _bus_node_labels(board: str, bus: str) -> list[str] | None:
+    """Labels of the nodes whose binding says ``bus: <bus>``, enabled
     ones first, or None when the devicetree can't be read; vendors name these nodes
     too differently for a label pattern."""
     edt = _get_edt(board)
@@ -363,13 +380,13 @@ def _lookup_bus_labels_by_property_match(
     enabled: list[str] = []
     disabled: list[str] = []
     for node in _iter_nodes(edt):
-        if property_label in node.buses and node.labels:
+        if bus in node.buses and node.labels:
             (enabled if node.status == "okay" else disabled).append(node.labels[0])
 
-    result = sorted(set(enabled)) + sorted(set(disabled) - set(enabled))
-    _LOGGER.debug(
-        "Nodes with bus '%s' on board '%s': %s", property_label, board, result
+    result = sorted(set(enabled), key=_natural_key) + sorted(
+        set(disabled) - set(enabled), key=_natural_key
     )
+    _LOGGER.debug("Nodes with bus '%s' on board '%s': %s", bus, board, result)
     return result
 
 
@@ -387,7 +404,7 @@ def get_console_uart_label(board: str) -> str | None:
 def get_uart_controller_labels(board: str) -> list[str] | None:
     """The board's UART labels, enabled ones first, or None when the devicetree
     can't be read."""
-    return _lookup_bus_labels_by_property_match(board, "uart")
+    return _bus_node_labels(board, "uart")
 
 
 def _discover_uart_node_labels(board: str) -> dict[str, str] | None:
