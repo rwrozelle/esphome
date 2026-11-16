@@ -210,6 +210,10 @@ def zephyr_config_schema(
 
     CORE.data[KEY_CORE][KEY_TARGET_PLATFORM] = platform
     config = zephyr_toolchain_schema(families)(config)
+    # The schema's toolchain: key, the command line or the default
+    config = cv.resolve_toolchain(platform, (Toolchain.ZEPHYR,), Toolchain.ZEPHYR)(
+        config
+    )
     return get_variant_module(config[CONF_VARIANT]).config_schema(config)
 
 
