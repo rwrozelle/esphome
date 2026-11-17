@@ -928,8 +928,3 @@ def test_watchdog_node_label(
 ) -> None:
     board_edt(nodes)
     assert get_watchdog_node_label("nucleo_c5a3zg") == expected
-
-
-@pytest.mark.usefixtures("no_edt")
-def test_watchdog_node_label_without_a_devicetree() -> None:
-    assert get_watchdog_node_label("nucleo_c5a3zg") == (None, False)

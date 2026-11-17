@@ -428,8 +428,6 @@ def get_watchdog_node_label(board: str) -> tuple[str | None, bool]:
     bindings/watchdog/ folder, enabled ones first. already_working is True when the
     aliased node is enabled."""
     edt = _get_edt(board)
-    if edt is None:
-        return None, False
     aliased = None
     for node in _iter_nodes(edt):
         if "watchdog0" in node.aliases:
