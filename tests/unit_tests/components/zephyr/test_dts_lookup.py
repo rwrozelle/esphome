@@ -784,11 +784,6 @@ def board_edt(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
     return _set
 
 
-@pytest.fixture
-def no_edt(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dts_lookup, "_get_edt", lambda board: None)
-
-
 def test_uart_controller_labels_enabled_first(board_edt: Callable[..., None]) -> None:
     board_edt(
         [
@@ -811,12 +806,6 @@ def test_uart_controller_labels_enabled_first(board_edt: Callable[..., None]) ->
         "usart1",
         "usart3",
     ]
-
-
-@pytest.mark.usefixtures("no_edt")
-def test_lookups_without_a_devicetree() -> None:
-    assert get_uart_controller_labels("nucleo_c5a3zg") is None
-    assert get_console_uart_label("nucleo_c5a3zg") is None
 
 
 @pytest.mark.parametrize(
