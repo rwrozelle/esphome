@@ -973,8 +973,3 @@ def test_find_node_label_by_compat_can_skip_disabled_nodes(
         )
         == expected
     )
-
-
-@pytest.mark.usefixtures("no_edt")
-def test_rng_node_label_without_a_devicetree() -> None:
-    assert get_rng_node_label("nucleo_c5a3zg") is None

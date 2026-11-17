@@ -454,10 +454,7 @@ def _find_node_label_by_compat(
 ) -> str | None:
     """The label of the first node whose ``compatible`` has ``compat``, or None.
     ``enabled_only=False`` finds nodes the SoC file ships disabled, such as STM32's RNG."""
-    edt = _get_edt(board)
-    if edt is None:
-        return None
-    for node in _iter_nodes(edt):
+    for node in _iter_nodes(_get_edt(board)):
         if (
             compat in node.compats
             and node.labels
