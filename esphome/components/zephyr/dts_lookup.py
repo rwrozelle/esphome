@@ -10,11 +10,11 @@ import subprocess
 import sys
 import tempfile
 from types import ModuleType
-from typing import Any, Final
+from typing import Any
 
 import yaml
 
-from esphome.core import CORE
+from esphome.core import CORE, EsphomeError
 
 from .board_revision import (
     declared_revisions,
@@ -32,8 +32,6 @@ from .const import (
 from .framework import get_zephyr_base
 
 _LOGGER = logging.getLogger(__name__)
-
-_NOT_FOUND: Final = object()
 
 
 def _load_edtlib(zephyr_base: Path) -> ModuleType:
@@ -59,27 +57,18 @@ def _load_edtlib(zephyr_base: Path) -> ModuleType:
             sys.path.remove(str(bundled))
 
 
-def _get_edt(board: str) -> Any | None:
-    """The parsed devicetree of ``board``, or None when it can't be read; cached per
-    board, so the preprocessor runs once per board and build."""
+def _get_edt(board: str) -> Any:
+    """The parsed devicetree of ``board``; cached per board, so the preprocessor runs
+    once per board and build. Raises EsphomeError when it can't be read."""
     cache = CORE.data[KEY_ZEPHYR][KEY_BOARD_EDT_CACHE]
     if board in cache:
-        result = cache[board]
-        return None if result is _NOT_FOUND else result
-
-    zephyr_base = get_zephyr_base()
+        return cache[board]
     try:
-        edt = _build_edt(board, zephyr_base)
+        edt = _build_edt(board, get_zephyr_base())
     except _DtsReadError as err:
-        _LOGGER.warning(
-            "Can't read the devicetree of board '%s': %s",
-            board,
-            err,
-        )
-        # A workspace installed later in this build is read then
-        if zephyr_base.is_dir():
-            cache[board] = _NOT_FOUND
-        return None
+        raise EsphomeError(
+            f"Can't read the devicetree of board '{board}': {err}"
+        ) from err
     cache[board] = edt
     return edt
 
