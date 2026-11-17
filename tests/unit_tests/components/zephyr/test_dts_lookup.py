@@ -368,14 +368,16 @@ def test_get_edt_merges_the_revision_overlay(
     assert left_out not in edt_texts[0]
 
 
-def test_get_edt_warns_on_an_unknown_revision(
-    edt_texts: list[str], zephyr_base: Path, caplog: pytest.LogCaptureFixture
+def test_get_edt_fails_on_an_unknown_revision(
+    edt_texts: list[str], zephyr_base: Path
 ) -> None:
     _revisioned_board_dir(zephyr_base)
 
-    assert _get_edt("actinius_icarus@0.1.0/nrf9160/ns") is None
+    with pytest.raises(
+        EsphomeError, match=r"revision '0.1.0' is not one it declares \(1.4.0, 2.0.0\)"
+    ):
+        _get_edt("actinius_icarus@0.1.0/nrf9160/ns")
     assert edt_texts == []
-    assert "revision '0.1.0' is not one it declares (1.4.0, 2.0.0)" in caplog.text
 
 
 def test_get_edt_without_the_revision_overlay_file(
@@ -414,21 +416,18 @@ def _board_tree(base: Path) -> None:
     (board / "my_board.dts").write_text("/ { };")
 
 
-def test_get_edt_warns_once_when_cpp_missing(
-    monkeypatch: pytest.MonkeyPatch,
-    zephyr_base: Path,
-    caplog: pytest.LogCaptureFixture,
+def test_get_edt_fails_when_cpp_missing(
+    monkeypatch: pytest.MonkeyPatch, zephyr_base: Path
 ) -> None:
     _board_tree(zephyr_base)
     monkeypatch.setattr(dts_lookup, "_find_cpp", lambda: None)
     monkeypatch.setattr(dts_lookup, "_load_edtlib", _fake_edtlib(lambda *a, **k: 1))
 
-    assert _get_edt("my_board") is None
-    assert _get_edt("my_board") is None
-
-    warnings = [r for r in caplog.records if "Can't read the devicetree" in r.message]
-    assert len(warnings) == 1
-    assert "No working C preprocessor" in warnings[0].message
+    with pytest.raises(
+        EsphomeError,
+        match="Can't read the devicetree of board 'my_board': No working C preprocessor",
+    ):
+        _get_edt("my_board")
 
 
 @pytest.mark.parametrize(
@@ -441,10 +440,9 @@ def test_get_edt_warns_once_when_cpp_missing(
         ),
     ],
 )
-def test_get_edt_warns_when_the_board_files_are_missing(
+def test_get_edt_fails_when_the_board_files_are_missing(
     monkeypatch: pytest.MonkeyPatch,
     zephyr_base: Path,
-    caplog: pytest.LogCaptureFixture,
     prepare: Callable[[Path], object],
     message: str,
 ) -> None:
@@ -452,34 +450,32 @@ def test_get_edt_warns_when_the_board_files_are_missing(
     prepare(zephyr_base)
     monkeypatch.setattr(dts_lookup, "_load_edtlib", _fake_edtlib(lambda *a, **k: 1))
 
-    assert _get_edt("my_board") is None
-    assert message in caplog.text
+    with pytest.raises(EsphomeError, match=message):
+        _get_edt("my_board")
 
 
-def test_get_edt_warns_when_the_workspace_is_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+def test_get_edt_fails_when_the_workspace_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(dts_lookup, "get_zephyr_base", lambda: tmp_path / "missing")
 
-    assert _get_edt("my_board") is None
-    assert "is not installed" in caplog.text
-    # Read again once the workspace is installed
-    assert "my_board" not in CORE.data[KEY_ZEPHYR][KEY_BOARD_EDT_CACHE]
+    with pytest.raises(EsphomeError, match="is not installed"):
+        _get_edt("my_board")
 
 
-def test_get_edt_warns_without_the_devicetree_library(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_get_edt_fails_without_the_devicetree_library(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(dts_lookup, "get_zephyr_base", lambda: tmp_path)
 
-    assert _get_edt("my_board") is None
-    assert "the workspace has no devicetree library in" in caplog.text
+    with pytest.raises(
+        EsphomeError, match="the workspace has no devicetree library in"
+    ):
+        _get_edt("my_board")
 
 
-def test_get_edt_warns_when_devicetree_parse_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    zephyr_base: Path,
-    caplog: pytest.LogCaptureFixture,
+def test_get_edt_fails_when_devicetree_parse_fails(
+    monkeypatch: pytest.MonkeyPatch, zephyr_base: Path
 ) -> None:
     _board_tree(zephyr_base)
     (zephyr_base / "dts" / "bindings").mkdir(parents=True)
@@ -491,8 +487,8 @@ def test_get_edt_warns_when_devicetree_parse_fails(
     monkeypatch.setattr(dts_lookup, "_preprocess_dts_file", _fake_preprocess_dts_file)
     monkeypatch.setattr(dts_lookup, "_load_edtlib", _fake_edtlib(_reject))
 
-    assert _get_edt("my_board") is None
-    assert "devicetree parse failed: unknown binding" in caplog.text
+    with pytest.raises(EsphomeError, match="devicetree parse failed: unknown binding"):
+        _get_edt("my_board")
 
 
 @pytest.mark.parametrize("cpp_found", [True, False])
@@ -512,10 +508,11 @@ def test_get_edt_leaves_no_temp_files(
         monkeypatch.setattr(
             dts_lookup, "_preprocess_dts_file", _fake_preprocess_dts_file
         )
+        assert _get_edt("my_board") == 1
     else:
         monkeypatch.setattr(dts_lookup, "_find_cpp", lambda: None)
-
-    assert _get_edt("my_board") == (1 if cpp_found else None)
+        with pytest.raises(EsphomeError):
+            _get_edt("my_board")
     assert not list(temp_dir.iterdir())
 
 
@@ -792,11 +789,6 @@ def board_edt(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
     return _set
 
 
-@pytest.fixture
-def no_edt(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dts_lookup, "_get_edt", lambda board: None)
-
-
 def test_uart_controller_labels_enabled_first(board_edt: Callable[..., None]) -> None:
     board_edt(
         [
@@ -819,12 +811,6 @@ def test_uart_controller_labels_enabled_first(board_edt: Callable[..., None]) ->
         "usart1",
         "usart3",
     ]
-
-
-@pytest.mark.usefixtures("no_edt")
-def test_lookups_without_a_devicetree() -> None:
-    assert get_uart_controller_labels("nucleo_c5a3zg") is None
-    assert get_console_uart_label("nucleo_c5a3zg") is None
 
 
 @pytest.mark.parametrize(

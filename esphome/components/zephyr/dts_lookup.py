@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from types import ModuleType
-from typing import Any, Final
+from typing import Any
 
 import yaml
 
@@ -33,8 +33,6 @@ from .const import (
 from .framework import get_zephyr_base
 
 _LOGGER = logging.getLogger(__name__)
-
-_NOT_FOUND: Final = object()
 
 
 def _load_edtlib(zephyr_base: Path) -> ModuleType:
@@ -60,27 +58,18 @@ def _load_edtlib(zephyr_base: Path) -> ModuleType:
             sys.path.remove(str(bundled))
 
 
-def _get_edt(board: str) -> Any | None:
-    """The parsed devicetree of ``board``, or None when it can't be read; cached per
-    board, so the preprocessor runs once per board and build."""
+def _get_edt(board: str) -> Any:
+    """The parsed devicetree of ``board``; cached per board, so the preprocessor runs
+    once per board and build. Raises EsphomeError when it can't be read."""
     cache = CORE.data[KEY_ZEPHYR][KEY_BOARD_EDT_CACHE]
     if board in cache:
-        result = cache[board]
-        return None if result is _NOT_FOUND else result
-
-    zephyr_base = get_zephyr_base()
+        return cache[board]
     try:
-        edt = _build_edt(board, zephyr_base)
+        edt = _build_edt(board, get_zephyr_base())
     except _DtsReadError as err:
-        _LOGGER.warning(
-            "Can't read the devicetree of board '%s': %s",
-            board,
-            err,
-        )
-        # A workspace installed later in this build is read then
-        if zephyr_base.is_dir():
-            cache[board] = _NOT_FOUND
-        return None
+        raise EsphomeError(
+            f"Can't read the devicetree of board '{board}': {err}"
+        ) from err
     cache[board] = edt
     return edt
 
@@ -369,14 +358,10 @@ def _natural_key(label: str) -> tuple[list[str | int], str]:
     return parts, label
 
 
-def _bus_node_labels(board: str, bus: str) -> list[str] | None:
+def _bus_node_labels(board: str, bus: str) -> list[str]:
     """Labels of the nodes whose binding says ``bus: <bus>``, enabled
-    ones first, or None when the devicetree can't be read; vendors name these nodes
-    too differently for a label pattern."""
+    ones first; vendors name these nodes too differently for a label pattern."""
     edt = _get_edt(board)
-    if edt is None:
-        return None
-
     enabled: list[str] = []
     disabled: list[str] = []
     for node in _iter_nodes(edt):
@@ -392,18 +377,14 @@ def _bus_node_labels(board: str, bus: str) -> list[str] | None:
 
 def get_console_uart_label(board: str) -> str | None:
     """The label of the board's ``zephyr,console`` UART, which is UART0, or None."""
-    edt = _get_edt(board)
-    if edt is None:
-        return None
-    node = edt.chosen_node("zephyr,console")
+    node = _get_edt(board).chosen_node("zephyr,console")
     if node is None or not node.labels:
         return None
     return node.labels[0]
 
 
-def get_uart_controller_labels(board: str) -> list[str] | None:
-    """The board's UART labels, enabled ones first, or None when the devicetree
-    can't be read."""
+def get_uart_controller_labels(board: str) -> list[str]:
+    """The board's UART labels, enabled ones first."""
     return _bus_node_labels(board, "uart")
 
 
@@ -414,9 +395,7 @@ def _discover_uart_node_labels(board: str) -> dict[str, str] | None:
     console = get_console_uart_label(board)
     if console is None:
         return None
-    others = [
-        label for label in (get_uart_controller_labels(board) or []) if label != console
-    ]
+    others = [label for label in get_uart_controller_labels(board) if label != console]
     mapping = {"UART0": console}
     mapping.update({f"UART{i + 1}": label for i, label in enumerate(others)})
     return mapping
@@ -429,7 +408,7 @@ def resolve_uart_node_label(board: str, hw_uart: str) -> str:
     if mapping is None:
         raise EsphomeError(
             f"Cannot determine the console UART for board '{board}': its devicetree "
-            "has no zephyr,console UART, or couldn't be read (see the warning above)"
+            "has no zephyr,console UART"
         )
     label = mapping.get(hw_uart)
     if label is None:
