@@ -169,13 +169,18 @@ def west_build_command(
     board: str,
     build_dir: Path,
     source_dir: Path,
+    *,
+    sysbuild: bool = False,
 ) -> list[str]:
+    """``sysbuild`` turns sysbuild on where the framework leaves it off (mainline
+    Zephyr); the build then nests the app's output in ``build_dir/zephyr/``."""
     return [
         str(python_executable),
         "-m",
         "west",
         "build",
         "--pristine=auto",
+        *(["--sysbuild"] if sysbuild else []),
         "-b",
         board,
         "-d",

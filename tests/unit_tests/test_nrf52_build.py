@@ -21,3 +21,17 @@ def test_west_build_sets_the_cmake_build_type() -> None:
     assert "-b" in cmd and "adafruit_feather_nrf52840" in cmd
     # CMake arguments come after west's own
     assert cmd[cmd.index("--") + 1 :] == ["-DCMAKE_BUILD_TYPE=MinSizeRel"]
+    assert "--sysbuild" not in cmd
+
+
+def test_west_build_turns_sysbuild_on() -> None:
+    cmd = west_build_command(
+        Path("/penv/python"),
+        "xiao_stm32c5",
+        Path("/build/.west_build"),
+        Path("/build/zephyr"),
+        sysbuild=True,
+    )
+
+    # A west option, before the CMake arguments
+    assert cmd.index("--sysbuild") < cmd.index("--")

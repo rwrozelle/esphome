@@ -336,3 +336,20 @@ def test_zephyr_base_is_the_installed_workspace(workspace: Path) -> None:
 
     assert framework.build_workspace() == (ZEPHYR_MAINLINE, VERSION)
     assert framework.get_zephyr_base() == workspace / "zephyr"
+
+
+def test_build_paths_and_env(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """West runs from the workspace with the venv first on PATH and the SDK named."""
+    CORE.build_path = workspace.parent / "build"
+    CORE.config_path = workspace.parent / "test.yaml"
+    monkeypatch.setenv("PATH", "/usr/bin")
+    python, framework_path = framework.get_build_paths(ZEPHYR_MAINLINE, VERSION)
+    assert framework_path == workspace
+
+    env = framework.get_build_env(python, framework_path, Path("/sdk"), None)
+
+    assert env["PATH"].split(os.pathsep) == [str(python.parent), "/usr/bin"]
+    assert env["ZEPHYR_BASE"] == str(workspace / "zephyr")
+    assert env["ZEPHYR_SDK_INSTALL_DIR"] == str(Path("/sdk"))
+    assert env["ZEPHYR_TOOLCHAIN_VARIANT"] == "zephyr"
+    assert env["CCACHE_DISABLE"] == "1"

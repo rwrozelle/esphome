@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from pathlib import Path
 import textwrap
-from typing import Literal, NamedTuple, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Literal, NamedTuple, NotRequired, TypedDict
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
@@ -17,7 +17,7 @@ from esphome.const import (
     KEY_TARGET_PLATFORM,
     Toolchain,
 )
-from esphome.core import CORE, CoroPriority, coroutine_with_priority
+from esphome.core import CORE, CoroPriority, EsphomeError, coroutine_with_priority
 from esphome.core.config import BOARD_MAX_LENGTH
 from esphome.helpers import copy_file_if_changed, write_file_if_changed
 from esphome.types import ConfigType
@@ -38,6 +38,9 @@ from .const import (
     KEY_ZEPHYR,
     zephyr_ns,
 )
+
+if TYPE_CHECKING:
+    from .variants import ZephyrSDK
 
 CODEOWNERS = ["@tomaszduda23"]
 DOMAIN = "zephyr"
@@ -568,3 +571,98 @@ def copy_files() -> None:
         # can't reuse stale configure results (the native sdk-nrf toolchain
         # rebuilds pristine when the cache is missing).
         clean_cmake_cache()
+
+
+def zephyr_additional_framework_projects(sdk: "ZephyrSDK") -> frozenset[str]:
+    """The framework projects this build needs beyond the framework's required ones:
+    the family's vendor HALs on mainline."""
+    # deferred: the variants package imports this one
+    from .variants import ZEPHYR_MAINLINE, get_family_module  # noqa: PLC0415
+
+    if sdk is ZEPHYR_MAINLINE and (family := zephyr_variant_family()) is not None:
+        return get_family_module(family).ADDITIONAL_FRAMEWORK_PROJECTS
+    return frozenset()
+
+
+async def zephyr_toolchain_to_code(config: ConfigType) -> None:
+    """Code generation of a platform in the variants registry."""
+    # deferred: the variants package imports this one
+    from .dts_lookup import validate_board, validate_board_revision  # noqa: PLC0415
+    from .framework import build_workspace, check_and_install  # noqa: PLC0415
+    from .variants import get_family_module, get_variant_module  # noqa: PLC0415
+
+    # Code generation reads the board's devicetree from the workspace; the compile
+    # installs again for projects components ask for later
+    sdk, version = build_workspace()
+    check_and_install(sdk, version, zephyr_additional_framework_projects(sdk))
+
+    board = zephyr_data()["board"]
+    if not validate_board(board):
+        raise EsphomeError(f"Board '{board}' was not found. Check the board name.")
+    if validate_board_revision(board) is False:
+        raise EsphomeError(
+            f"Board '{board}' requests a revision that is not valid for that board. "
+            f"Check the '@<revision>' suffix in '{CONF_BOARD}'."
+        )
+
+    # Before zephyr_to_code: its weak 2048 is too small for these builds
+    zephyr_add_prj_conf("MAIN_STACK_SIZE", 4096, required=False)
+    zephyr_to_code(config)
+    if (family := zephyr_variant_family()) is not None:
+        get_family_module(family).to_code(config)
+    await get_variant_module(zephyr_variant()).to_code(config)
+
+
+def run_compile(args: object, config: ConfigType) -> bool:
+    """Build a platform in the variants registry with west."""
+    # deferred: the variants package imports this one
+    from esphome.build_helpers.ccache import resolve_ccache_path  # noqa: PLC0415
+    from esphome.build_helpers.idedata import warn_if_idedata_missing  # noqa: PLC0415
+    from esphome.framework_helpers import run_command_ok  # noqa: PLC0415
+
+    from .build_zephyr import (  # noqa: PLC0415
+        clean_changed_build,
+        generate_cmake_lists,
+        west_build_command,
+    )
+    from .framework import (  # noqa: PLC0415
+        build_workspace,
+        check_and_install,
+        get_build_env,
+        get_build_paths,
+        install_toolchain,
+    )
+    from .toolchain import get_idedata  # noqa: PLC0415
+    from .variants import VARIANTS  # noqa: PLC0415
+
+    variant = zephyr_variant()
+    if (toolchain := VARIANTS[variant].toolchain) is None:
+        raise EsphomeError(f"Variant {variant} names no Zephyr SDK toolchain")
+    sdk, version = build_workspace()
+    # Again, for projects components asked for after code generation
+    check_and_install(sdk, version, zephyr_additional_framework_projects(sdk))
+    python_executable, framework_path = get_build_paths(sdk, version)
+    env = get_build_env(
+        python_executable,
+        framework_path,
+        install_toolchain(framework_path, toolchain),
+        resolve_ccache_path(),
+    )
+
+    build_dir = CORE.relative_build_path(".west_build")
+    clean_changed_build(build_dir, generate_cmake_lists("Zephyr", False))
+    west_cmd = west_build_command(
+        python_executable,
+        zephyr_data()["board"],
+        build_dir,
+        CORE.relative_build_path("zephyr"),
+        # Off by default on mainline; the image paths assume its layout
+        sysbuild=True,
+    )
+    if not run_command_ok(
+        west_cmd, env=env, stream_output=True, cwd=str(framework_path)
+    ):
+        raise EsphomeError("Zephyr native build failed")
+
+    warn_if_idedata_missing(get_idedata)
+    return True

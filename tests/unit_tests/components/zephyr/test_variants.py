@@ -289,3 +289,10 @@ def test_variant_read_before_the_platform_schema_is_rejected(
     CORE.data[KEY_CORE] = {} if platform is None else {KEY_TARGET_PLATFORM: platform}
     with pytest.raises(RuntimeError, match="before the platform schema set it"):
         lookup()
+
+
+def test_every_family_names_its_vendor_hals() -> None:
+    for family in {v.family for v in variants.VARIANTS.values() if v.family}:
+        hals = variants.get_family_module(family).ADDITIONAL_FRAMEWORK_PROJECTS
+        assert hals
+        assert all(h.startswith("hal_") for h in hals)

@@ -16,7 +16,9 @@ from ..const import VARIANT_STM32C5
 _DEFAULT_BOARD: str = "nucleo_c5a3zg"
 
 VARIANT_NAME: str = VARIANT_STM32C5
-VARIANT: ZephyrVariant = ZephyrVariant(sdk=ZEPHYR_MAINLINE, family="stm32")
+VARIANT: ZephyrVariant = ZephyrVariant(
+    sdk=ZEPHYR_MAINLINE, family="stm32", toolchain="arm-zephyr-eabi"
+)
 
 
 def config_schema(config: ConfigType) -> ConfigType:
@@ -30,7 +32,7 @@ def config_schema(config: ConfigType) -> ConfigType:
     return config
 
 
-def to_code(config: ConfigType) -> None:
+async def to_code(config: ConfigType) -> None:
     # deferred: zephyr's __init__ may load the variants while it imports
     from esphome.components.zephyr import (
         zephyr_add_overlay,

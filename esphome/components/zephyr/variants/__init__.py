@@ -61,6 +61,8 @@ class ZephyrVariant:
     alt_sdks: dict[str, ZephyrSDK] = field(default_factory=dict)
     # Sibling chips that share a module, ``<family>_family`` next to the variants
     family: str | None = None
+    # Zephyr SDK cross-compiler the variant builds with, e.g. "arm-zephyr-eabi"
+    toolchain: str | None = None
 
 
 ZEPHYR_MAINLINE: ZephyrSDK = ZephyrSDK(

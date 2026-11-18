@@ -39,7 +39,13 @@ class ErrorFormat(StrEnum):
 
 # Toolchains that drive their build natively and never read platformio.ini.
 NATIVE_TOOLCHAINS = frozenset(
-    {Toolchain.ESP_IDF, Toolchain.ARDUINO, Toolchain.HOST, Toolchain.SDK_NRF}
+    {
+        Toolchain.ESP_IDF,
+        Toolchain.ARDUINO,
+        Toolchain.HOST,
+        Toolchain.SDK_NRF,
+        Toolchain.ZEPHYR,
+    }
 )
 
 
@@ -122,6 +128,7 @@ class PlatformFramework(Enum):
 
     # Zephyr framework platforms
     NRF52_ZEPHYR = (Platform.NRF52, Framework.ZEPHYR)
+    STM32_ZEPHYR = (Platform.STM32, Framework.ZEPHYR)
 
     # Host platform (native)
     HOST_NATIVE = (Platform.HOST, Framework.NATIVE)

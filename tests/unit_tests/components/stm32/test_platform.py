@@ -1,9 +1,14 @@
-"""Tests for the stm32: platform schema."""
+"""Tests for the stm32: platform."""
+
+import asyncio
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from esphome.components import stm32
 from esphome.components.zephyr import (
+    zephyr_add_prj_conf,
     zephyr_data,
     zephyr_framework_type,
     zephyr_toolchain_schema,
@@ -23,7 +28,7 @@ from esphome.const import (
     PLATFORM_STM32,
     Toolchain,
 )
-from esphome.core import CORE
+from esphome.core import CORE, CoroPriority
 from esphome.schema_extractors import SCHEMA_EXTRACT
 
 
@@ -124,3 +129,35 @@ def test_schema_extract_gives_the_platform_schema() -> None:
 def test_toolchain_schema_lists_only_the_families_variants() -> None:
     with pytest.raises(cv.Invalid, match="Unknown value"):
         zephyr_toolchain_schema(frozenset({"other"}))({CONF_VARIANT: "STM32C5"})
+
+
+def test_copy_files_writes_the_zephyr_build_files(tmp_path: Path) -> None:
+    CORE.config_path = tmp_path / "test.yaml"
+    CORE.build_path = tmp_path
+    CORE.name = "test"
+    stm32.CONFIG_SCHEMA({CONF_VARIANT: "STM32C5"})
+    zephyr_add_prj_conf("REBOOT", True)
+
+    stm32.copy_files()
+
+    assert (tmp_path / "zephyr" / "prj.conf").read_text() == "CONFIG_REBOOT=y\n"
+    assert (tmp_path / "zephyr" / "app.overlay").is_file()
+
+
+def test_to_code_runs_the_zephyr_code_generation_first() -> None:
+    """At PLATFORM priority, so the workspace is installed before any devicetree read."""
+    assert stm32.to_code.priority == float(CoroPriority.PLATFORM)
+    with patch(
+        "esphome.components.zephyr.zephyr_toolchain_to_code", new=AsyncMock()
+    ) as to_code:
+        asyncio.run(stm32.to_code({CONF_VARIANT: "STM32C5"}))
+    to_code.assert_awaited_once_with({CONF_VARIANT: "STM32C5"})
+
+
+def test_run_compile_claims_the_build() -> None:
+    """True tells the compile command the platform built it."""
+    with patch(
+        "esphome.components.zephyr.run_compile", new=MagicMock(return_value=True)
+    ) as run_compile:
+        assert stm32.run_compile("args", {}) is True
+    run_compile.assert_called_once_with("args", {})

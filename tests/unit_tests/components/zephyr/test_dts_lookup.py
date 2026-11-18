@@ -32,6 +32,8 @@ from esphome.components.zephyr.dts_lookup import (
     get_uart_controller_labels,
     get_watchdog_node_label,
     resolve_uart_node_label,
+    validate_board,
+    validate_board_revision,
 )
 from esphome.core import CORE, EsphomeError
 
@@ -973,3 +975,40 @@ def test_find_node_label_by_compat_can_skip_disabled_nodes(
         )
         == expected
     )
+
+
+def test_validate_board(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _revisioned_board_dir(tmp_path)
+    monkeypatch.setattr(dts_lookup, "get_zephyr_base", lambda: tmp_path)
+    assert validate_board("actinius_icarus/nrf9160/ns") is True
+    assert validate_board("no_such_board") is False
+
+
+@pytest.mark.parametrize(
+    ("board", "expected"),
+    [
+        pytest.param("actinius_icarus/nrf9160/ns", None, id="no_revision"),
+        pytest.param("actinius_icarus@1.9.0/nrf9160/ns", True, id="resolvable"),
+        pytest.param("actinius_icarus@0.1.0/nrf9160/ns", False, id="unresolvable"),
+        pytest.param("no_such_board@1.0.0", None, id="unknown_board"),
+    ],
+)
+def test_validate_board_revision(
+    board: str,
+    expected: bool | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _revisioned_board_dir(tmp_path)
+    monkeypatch.setattr(dts_lookup, "get_zephyr_base", lambda: tmp_path)
+    assert validate_board_revision(board) is expected
+
+
+def test_validate_board_revision_ignores_a_board_without_revisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    board_dir = tmp_path / "boards" / "espressif" / "my_board"
+    board_dir.mkdir(parents=True)
+    (board_dir / "my_board.dts").write_text("/* base */")
+    monkeypatch.setattr(dts_lookup, "get_zephyr_base", lambda: tmp_path)
+    assert validate_board_revision("my_board@1.0.0") is None

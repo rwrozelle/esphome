@@ -931,6 +931,11 @@ class EsphomeCore:
             return self.relative_build_path("build", f"{self.name}.bin")
         if self.is_libretiny:
             return self.relative_pioenvs_path(self.name, "firmware.uf2")
+        if self.using_toolchain_zephyr:
+            # Sysbuild nests the app's image in its own zephyr/ folder
+            return self.relative_build_path(
+                ".west_build", "zephyr", "zephyr", "zephyr.bin"
+            )
         if self.is_host:
             # Host builds produce a native ELF/Mach-O named `program`.
             return self.relative_pioenvs_path(self.name, "program")
@@ -1193,8 +1198,12 @@ class EsphomeCore:
     def add_build_unflag(self, build_unflag: str) -> None:
         # No warning for using_toolchain_arduino: the native ESP8266 build
         # honors build_unflags (token-level, matching PlatformIO).
-        if self.using_toolchain_esp_idf or self.using_toolchain_sdk_nrf:
-            # The native ESP-IDF and nRF52 build generators do not consume
+        if (
+            self.using_toolchain_esp_idf
+            or self.using_toolchain_sdk_nrf
+            or self.using_toolchain_zephyr
+        ):
+            # The native ESP-IDF, nRF52 and Zephyr build generators do not consume
             # build_unflags
             _LOGGER.warning(
                 "Build unflag %s is ignored when building with the native "

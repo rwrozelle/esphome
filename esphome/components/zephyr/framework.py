@@ -1,5 +1,6 @@
 """Install the Zephyr framework for Zephyr toolchain builds."""
 
+import os
 from pathlib import Path
 import time
 
@@ -8,6 +9,7 @@ from esphome.const import KEY_CORE, KEY_FRAMEWORK_VERSION
 from esphome.core import CORE, EsphomeError
 from esphome.framework_helpers import get_python_env_executable_path, install_lock
 
+from .build_zephyr import add_ccache_env
 from .framework_helpers import (
     ensure_venv,
     ensure_zephyr_requirements,
@@ -58,6 +60,28 @@ def build_workspace() -> tuple[ZephyrSDK, str]:
 def get_zephyr_base() -> Path:
     """This build's workspace's zephyr/ folder, Zephyr's ZEPHYR_BASE."""
     return _get_framework_path(*build_workspace()) / "zephyr"
+
+
+def get_build_paths(sdk: ZephyrSDK, version: str) -> tuple[Path, Path]:
+    """The venv's python and the workspace a build runs west in."""
+    return (
+        get_python_env_executable_path(_get_python_env_path(version), "python"),
+        _get_framework_path(sdk, version),
+    )
+
+
+def get_build_env(
+    python_executable: Path, framework_path: Path, sdk_path: Path, ccache: str | None
+) -> dict[str, str]:
+    """The environment west builds in, as on nrf52."""
+    env = os.environ.copy()
+    env["PATH"] = str(python_executable.parent) + os.pathsep + env.get("PATH", "")
+    env["ZEPHYR_BASE"] = str(framework_path / "zephyr")
+    # The SDK sits in the esphome cache, off CMake's search path
+    env["ZEPHYR_SDK_INSTALL_DIR"] = str(sdk_path)
+    env["ZEPHYR_TOOLCHAIN_VARIANT"] = "zephyr"
+    add_ccache_env(env, ccache, ZEPHYR_TOOLS_CACHE)
+    return env
 
 
 def check_and_install(sdk: ZephyrSDK, version: str, projects: frozenset[str]) -> None:

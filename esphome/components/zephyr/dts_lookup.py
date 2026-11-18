@@ -467,3 +467,24 @@ def _find_node_label_by_compat(
 def get_rng_node_label(board: str, compat: str = "st,stm32-rng") -> str | None:
     """The label of the board's ``compat`` RNG node, enabled or not, or None."""
     return _find_node_label_by_compat(board, compat, enabled_only=False)
+
+
+def validate_board(board: str) -> bool:
+    """Check whether board resolves to a real board directory."""
+    return _find_board_dir(get_zephyr_base(), board) is not None
+
+
+def validate_board_revision(board: str) -> bool | None:
+    """Check whether board's "@<revision>" resolves against its board.yml. None
+    means nothing to check -- no revision requested, board doesn't resolve, or
+    the board declares no revisions at all."""
+    requested_revision = parse_board_string(board).revision
+    if requested_revision is None:
+        return None
+    board_dir = _find_board_dir(get_zephyr_base(), board)
+    if board_dir is None:
+        return None
+    resolved, declares_revisions = resolve_revision(board_dir, requested_revision)
+    if not declares_revisions:
+        return None
+    return resolved is not None

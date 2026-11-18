@@ -1,5 +1,6 @@
 """Tests for the STM32 Zephyr variants."""
 
+import asyncio
 from collections.abc import Callable
 
 import pytest
@@ -63,7 +64,7 @@ def test_to_code(rng_label: Callable[[str | None], None]) -> None:
     rng_label("rng")
     stm32c5.config_schema({CONF_FRAMEWORK: {}})
 
-    stm32c5.to_code({CONF_BOARD: "nucleo_c5a3zg"})
+    asyncio.run(stm32c5.to_code({CONF_BOARD: "nucleo_c5a3zg"}))
 
     defines = {define.name: str(define.value) for define in CORE.defines}
     assert defines["ESPHOME_BOARD"] == '"nucleo_c5a3zg"'
@@ -90,7 +91,7 @@ def test_to_code_picks_the_entropy_source(
     rng_label(label)
     stm32c5.config_schema({CONF_FRAMEWORK: {}})
 
-    stm32c5.to_code({CONF_BOARD: "nucleo_c5a3zg"})
+    asyncio.run(stm32c5.to_code({CONF_BOARD: "nucleo_c5a3zg"}))
 
     other = ({"ENTROPY_GENERATOR", "TEST_RANDOM_GENERATOR"} - {prj_conf}).pop()
     assert _prj_conf()[prj_conf] is True
