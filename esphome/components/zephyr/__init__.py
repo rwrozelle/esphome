@@ -1,16 +1,12 @@
 from collections.abc import Callable
 from pathlib import Path
 import textwrap
-from typing import Literal, NamedTuple, NotRequired, TypedDict
+from types import ModuleType
+from typing import TYPE_CHECKING, Literal, NamedTuple, NotRequired, TypedDict
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.const import (
-    CONF_BOARD,
-    KEY_CORE,
-    KEY_FRAMEWORK_VERSION,
-    KEY_TARGET_PLATFORM,
-)
+from esphome.const import CONF_BOARD, KEY_CORE, KEY_TARGET_FRAMEWORK
 from esphome.core import CORE, CoroPriority, coroutine_with_priority
 from esphome.helpers import copy_file_if_changed, write_file_if_changed
 from esphome.types import ConfigType
@@ -19,18 +15,19 @@ from esphome.writer import clean_cmake_cache
 from .const import (
     KEY_BOOTLOADER,
     KEY_EXTRA_BUILD_FILES,
-    KEY_FAMILY,
-    KEY_FRAMEWORK_TYPE,
     KEY_KCONFIG,
     KEY_OVERLAY,
     KEY_OVERLAY_BUILDER,
     KEY_PM_STATIC,
     KEY_PRJ_CONF,
     KEY_SYSBUILD,
-    KEY_VARIANT,
+    KEY_VARIANT_RESOLVED,
     KEY_ZEPHYR,
     zephyr_ns,
 )
+
+if TYPE_CHECKING:
+    from .variants import ZephyrManifest, ZephyrVariant, ZephyrVariantResolved
 
 CODEOWNERS = ["@tomaszduda23"]
 DOMAIN = "zephyr"
@@ -97,10 +94,9 @@ class ZephyrData(TypedDict):
     cdc_acm_users: dict[int, list[CdcAcmUser]]
     # Add port 0 even when no component claims a port (see zephyr_require_cdc_acm())
     cdc_acm_required: bool
-    # Set for chips in the variants registry; nrf52 sets none of these
-    variant: NotRequired[str]
-    family: NotRequired[str | None]
-    framework_type: NotRequired[str]
+    # The active variant with its resolved manifest and version; set by the chips in a
+    # platform's zephyr_variants, not by nrf52
+    variant_resolved: NotRequired["ZephyrVariantResolved"]
     # The devicetree caches (dts_lookup); "" = not looked for, None = no preprocessor
     cpp_path: NotRequired[str | None]
     # None = not built yet
@@ -136,32 +132,59 @@ def zephyr_data() -> ZephyrData:
     return CORE.data[KEY_ZEPHYR]
 
 
-def _variant_data() -> ZephyrData | dict[str, object]:
-    """Raise if no platform is set yet, or a registry platform has no Zephyr data yet."""
+def _get_data() -> ZephyrData | dict[str, object]:
+    """Raise if the platform schema, which sets the target framework, has not run yet."""
     if (data := CORE.data.get(KEY_ZEPHYR)) is not None:
         return data
-    # deferred: the variants package imports this one
-    from .variants import _ZEPHYR_PLATFORMS  # noqa: PLC0415
-
-    platform = CORE.data.get(KEY_CORE, {}).get(KEY_TARGET_PLATFORM)
-    if platform is None or platform in _ZEPHYR_PLATFORMS:
+    if (framework := CORE.data.get(KEY_CORE, {}).get(KEY_TARGET_FRAMEWORK)) is None:
         raise RuntimeError("Zephyr variant read before the platform schema set it")
+    if framework == KEY_ZEPHYR:
+        raise RuntimeError("Zephyr build without Zephyr data")
     return {}
 
 
-def zephyr_variant() -> str | None:
-    """The active chip in the variants registry; None for nrf52 and other platforms."""
-    return _variant_data().get(KEY_VARIANT)
+def _variant_resolved() -> "ZephyrVariantResolved | None":
+    """The active variant with the manifest and version its `framework:` block resolved
+    to; None as for zephyr_variant_name()."""
+    return _get_data().get(KEY_VARIANT_RESOLVED)
 
 
-def zephyr_variant_family() -> str | None:
-    """The active variant's family, e.g. "stm32"; None without one."""
-    return _variant_data().get(KEY_FAMILY)
+def zephyr_variant() -> "ZephyrVariant | None":
+    """The active variant's ZephyrVariant; None as for zephyr_variant_name()."""
+    resolved = _variant_resolved()
+    return resolved.variant if resolved is not None else None
+
+
+def zephyr_variant_name() -> str | None:
+    """The active chip from a platform's zephyr_variants; None for nrf52 and others."""
+    variant = zephyr_variant()
+    return variant.name if variant is not None else None
+
+
+def zephyr_variant_family_module() -> ModuleType | None:
+    """The active variant's family module; None without one, or as for zephyr_variant_name()."""
+    variant = zephyr_variant()
+    return variant.family_module if variant is not None else None
+
+
+def zephyr_variant_family_name() -> str | None:
+    """The active variant's family name, e.g. "stm32"; None without one, or as for
+    zephyr_variant_name()."""
+    family = zephyr_variant_family_module()
+    return family.FAMILY if family is not None else None
 
 
 def zephyr_framework_type() -> str | None:
-    """The active `framework: type:`, e.g. "zephyr"; None outside the variants registry."""
-    return _variant_data().get(KEY_FRAMEWORK_TYPE)
+    """The active `framework: type:`, e.g. "zephyr"; None as for zephyr_variant_name()."""
+    manifest = zephyr_variant_manifest()
+    return manifest.framework_type if manifest is not None else None
+
+
+def zephyr_variant_manifest() -> "ZephyrManifest | None":
+    """The manifest the active variant's `framework: type:` selected; None as for
+    zephyr_variant_name()."""
+    resolved = _variant_resolved()
+    return resolved.manifest if resolved is not None else None
 
 
 def zephyr_add_prj_conf(
@@ -241,10 +264,7 @@ def zephyr_to_code(config: ConfigType) -> None:
     cg.add_define("USE_PREFERENCE_KEY_LOOKUP")
     cg.set_cpp_standard("gnu++20")
     # c++ support
-    zephyr_add_prj_conf("FPU", True)
     zephyr_add_prj_conf("STD_CPP20", True)
-    # random_bytes() uses sys_rand_get() which requires the entropy subsystem
-    zephyr_add_prj_conf("ENTROPY_GENERATOR", True)
 
     # <err> os: ***** USAGE FAULT *****
     # <err> os:   Illegal load of EXC_RETURN into PC
@@ -329,8 +349,7 @@ def zephyr_use_usb_device_next() -> bool:
     The new stack (device_next) is used from nRF Connect SDK 3.4.1, where the
     legacy stack is deprecated. Older SDKs keep the legacy stack.
     """
-    framework_ver: cv.Version = CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION]
-    return CORE.is_nrf52 and framework_ver >= cv.Version(3, 4, 1)
+    return CORE.is_nrf52 and CORE.framework_version >= cv.Version(3, 4, 1)
 
 
 def _disable_board_cdc_acm_overlay() -> str:
@@ -393,6 +412,12 @@ def zephyr_require_cdc_acm() -> None:
     zephyr_enable_usb_cdc_acm()
     if zephyr_use_usb_device_next():
         zephyr_data()["cdc_acm_required"] = True
+
+
+def zephyr_enable_poweroff() -> None:
+    """Enable sys_poweroff(); Zigbee builds leave it out and stay awake instead."""
+    if "zigbee" not in CORE.loaded_integrations:
+        zephyr_add_prj_conf("POWEROFF", True)
 
 
 def _cdc_acm_add_ports() -> None:
