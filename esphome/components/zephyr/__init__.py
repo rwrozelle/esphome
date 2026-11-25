@@ -1,7 +1,8 @@
 from collections.abc import Callable
 from pathlib import Path
 import textwrap
-from typing import Literal, NamedTuple, NotRequired, TypedDict
+from types import ModuleType
+from typing import TYPE_CHECKING, Literal, NamedTuple, NotRequired, TypedDict
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
@@ -13,7 +14,7 @@ from esphome.const import (
     CONF_VARIANT,
     CONF_VERSION,
     KEY_CORE,
-    KEY_FRAMEWORK_VERSION,
+    KEY_TARGET_FRAMEWORK,
     KEY_TARGET_PLATFORM,
     Toolchain,
 )
@@ -26,18 +27,19 @@ from esphome.writer import clean_cmake_cache
 from .const import (
     KEY_BOOTLOADER,
     KEY_EXTRA_BUILD_FILES,
-    KEY_FAMILY,
-    KEY_FRAMEWORK_TYPE,
     KEY_KCONFIG,
     KEY_OVERLAY,
     KEY_OVERLAY_BUILDER,
     KEY_PM_STATIC,
     KEY_PRJ_CONF,
     KEY_SYSBUILD,
-    KEY_VARIANT,
+    KEY_VARIANT_RESOLVED,
     KEY_ZEPHYR,
     zephyr_ns,
 )
+
+if TYPE_CHECKING:
+    from .variants import ZephyrManifest, ZephyrVariant, ZephyrVariantResolved
 
 CODEOWNERS = ["@tomaszduda23"]
 DOMAIN = "zephyr"
@@ -104,10 +106,9 @@ class ZephyrData(TypedDict):
     cdc_acm_users: dict[int, list[CdcAcmUser]]
     # Add port 0 even when no component claims a port (see zephyr_require_cdc_acm())
     cdc_acm_required: bool
-    # Set for chips in the variants registry; nrf52 sets none of these
-    variant: NotRequired[str]
-    family: NotRequired[str | None]
-    framework_type: NotRequired[str]
+    # The active variant with its resolved manifest and version; set by the chips in a
+    # platform's zephyr_variants, not by nrf52
+    variant_resolved: NotRequired["ZephyrVariantResolved"]
 
 
 def zephyr_set_core_data(config: ConfigType) -> None:
@@ -135,61 +136,77 @@ def zephyr_data() -> ZephyrData:
     return CORE.data[KEY_ZEPHYR]
 
 
-def _variant_data() -> ZephyrData | dict[str, object]:
-    """Raise if no platform is set yet, or a registry platform has no Zephyr data yet."""
+def _get_data() -> ZephyrData | dict[str, object]:
+    """Raise if the platform schema, which sets the target framework, has not run yet."""
     if (data := CORE.data.get(KEY_ZEPHYR)) is not None:
         return data
-    # deferred: the variants package imports this one
-    from .variants import _ZEPHYR_PLATFORMS  # noqa: PLC0415
-
-    platform = CORE.data.get(KEY_CORE, {}).get(KEY_TARGET_PLATFORM)
-    if platform is None or platform in _ZEPHYR_PLATFORMS:
+    if (framework := CORE.data.get(KEY_CORE, {}).get(KEY_TARGET_FRAMEWORK)) is None:
         raise RuntimeError("Zephyr variant read before the platform schema set it")
+    if framework == KEY_ZEPHYR:
+        raise RuntimeError("Zephyr build without Zephyr data")
     return {}
 
 
-def zephyr_variant() -> str | None:
-    """The active chip in the variants registry; None for nrf52 and other platforms."""
-    return _variant_data().get(KEY_VARIANT)
+def _variant_resolved() -> "ZephyrVariantResolved | None":
+    """The active variant with the manifest and version its `framework:` block resolved
+    to; None as for zephyr_variant_name()."""
+    return _get_data().get(KEY_VARIANT_RESOLVED)
 
 
-def zephyr_variant_family() -> str | None:
-    """The active variant's family, e.g. "stm32"; None without one."""
-    return _variant_data().get(KEY_FAMILY)
+def zephyr_variant() -> "ZephyrVariant | None":
+    """The active variant's ZephyrVariant; None as for zephyr_variant_name()."""
+    resolved = _variant_resolved()
+    return resolved.variant if resolved is not None else None
+
+
+def zephyr_variant_name() -> str | None:
+    """The active chip from a platform's zephyr_variants; None for nrf52 and others."""
+    variant = zephyr_variant()
+    return variant.name if variant is not None else None
+
+
+def zephyr_variant_family_module() -> ModuleType | None:
+    """The active variant's family module; None without one, or as for zephyr_variant_name()."""
+    variant = zephyr_variant()
+    return variant.family_module if variant is not None else None
+
+
+def zephyr_variant_family_name() -> str | None:
+    """The active variant's family name, e.g. "stm32"; None without one, or as for
+    zephyr_variant_name()."""
+    family = zephyr_variant_family_module()
+    return family.FAMILY if family is not None else None
 
 
 def zephyr_framework_type() -> str | None:
-    """The active `framework: type:`, e.g. "zephyr"; None outside the variants registry."""
-    return _variant_data().get(KEY_FRAMEWORK_TYPE)
+    """The active `framework: type:`, e.g. "zephyr"; None as for zephyr_variant_name()."""
+    manifest = zephyr_variant_manifest()
+    return manifest.framework_type if manifest is not None else None
 
 
-# `type:` and `version:` are checked by the variant's config_schema, which knows
-# its SDKs; see resolve_framework_version()
+def zephyr_variant_manifest() -> "ZephyrManifest | None":
+    """The manifest the active variant's `framework: type:` selected; None as for
+    zephyr_variant_name()."""
+    resolved = _variant_resolved()
+    return resolved.manifest if resolved is not None else None
+
+
+# `type:` and `version:` are checked by the variant's config_schema, which knows its
+# manifests; see resolve_variant()
 _FRAMEWORK_SCHEMA: cv.Schema = cv.Schema(
     {
         cv.Optional(CONF_TYPE): cv.string_strict,
-        # "recommended" is the SDK's default version, the same as leaving it out
+        # "recommended" is the manifest's default version, the same as leaving it out
         cv.Optional(CONF_VERSION): cv.string_strict,
     }
 )
 
 
-def zephyr_toolchain_schema(families: frozenset[str]) -> cv.Schema:
-    """The <platform>: schema of a Zephyr toolchain build, limited to the variants
-    of ``families``."""
-    # deferred: the variants package imports this one
-    from .variants import VARIANTS  # noqa: PLC0415
-
+def zephyr_toolchain_schema(variant_modules: dict[str, ModuleType]) -> cv.Schema:
+    """The <platform>: schema, limited to the platform's `variant_modules`."""
     return cv.Schema(
         {
-            cv.Required(CONF_VARIANT): cv.one_of(
-                *(
-                    name
-                    for name, variant in VARIANTS.items()
-                    if variant.family in families
-                ),
-                upper=True,
-            ),
+            cv.Required(CONF_VARIANT): cv.one_of(*variant_modules, upper=True),
             cv.Optional(CONF_BOARD): cv.All(
                 cv.string_strict, cv.ByteLength(max=BOARD_MAX_LENGTH)
             ),
@@ -201,20 +218,19 @@ def zephyr_toolchain_schema(families: frozenset[str]) -> cv.Schema:
 
 
 def zephyr_config_schema(
-    config: ConfigType, families: frozenset[str], platform: str
+    config: ConfigType, variant_modules: dict[str, ModuleType], platform: str
 ) -> ConfigType:
-    """Validate a <platform>: block whose variants come from ``families``; the
-    variant's own config_schema then sets the Zephyr data."""
-    # deferred: the variants package imports this one
-    from .variants import get_variant_module  # noqa: PLC0415
-
-    CORE.data[KEY_CORE][KEY_TARGET_PLATFORM] = platform
-    config = zephyr_toolchain_schema(families)(config)
+    """Validate a <platform>: block whose variants come from `variant_modules`."""
+    core = CORE.data.setdefault(KEY_CORE, {})
+    core[KEY_TARGET_PLATFORM] = platform
+    core[KEY_TARGET_FRAMEWORK] = KEY_ZEPHYR
+    config = zephyr_toolchain_schema(variant_modules)(config)
     # The schema's toolchain: key, the command line or the default
     config = cv.resolve_toolchain(platform, (Toolchain.ZEPHYR,), Toolchain.ZEPHYR)(
         config
     )
-    return get_variant_module(config[CONF_VARIANT]).config_schema(config)
+    variant_module = variant_modules[config[CONF_VARIANT]]
+    return variant_module.config_schema(config)
 
 
 def zephyr_add_prj_conf(
@@ -294,10 +310,7 @@ def zephyr_to_code(config: ConfigType) -> None:
     cg.add_define("USE_PREFERENCE_KEY_LOOKUP")
     cg.set_cpp_standard("gnu++20")
     # c++ support
-    zephyr_add_prj_conf("FPU", True)
     zephyr_add_prj_conf("STD_CPP20", True)
-    # random_bytes() uses sys_rand_get() which requires the entropy subsystem
-    zephyr_add_prj_conf("ENTROPY_GENERATOR", True)
 
     # <err> os: ***** USAGE FAULT *****
     # <err> os:   Illegal load of EXC_RETURN into PC
@@ -382,8 +395,7 @@ def zephyr_use_usb_device_next() -> bool:
     The new stack (device_next) is used from nRF Connect SDK 3.4.1, where the
     legacy stack is deprecated. Older SDKs keep the legacy stack.
     """
-    framework_ver: cv.Version = CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION]
-    return CORE.is_nrf52 and framework_ver >= cv.Version(3, 4, 1)
+    return CORE.is_nrf52 and CORE.framework_version >= cv.Version(3, 4, 1)
 
 
 def _disable_board_cdc_acm_overlay() -> str:
@@ -446,6 +458,12 @@ def zephyr_require_cdc_acm() -> None:
     zephyr_enable_usb_cdc_acm()
     if zephyr_use_usb_device_next():
         zephyr_data()["cdc_acm_required"] = True
+
+
+def zephyr_enable_poweroff() -> None:
+    """Enable sys_poweroff(); Zigbee builds leave it out and stay awake instead."""
+    if "zigbee" not in CORE.loaded_integrations:
+        zephyr_add_prj_conf("POWEROFF", True)
 
 
 def _cdc_acm_add_ports() -> None:
