@@ -10,8 +10,13 @@ from unittest.mock import MagicMock, patch
 import platformdirs
 import pytest
 
+from esphome.components.stm32.zephyr_variants import stm32c5
 from esphome.components.zephyr import framework, framework_helpers, sdk_install
-from esphome.components.zephyr.variants import ZEPHYR_MAINLINE, set_core_data
+from esphome.components.zephyr.variants import (
+    ZEPHYR_MAINLINE,
+    ZephyrVariantResolved,
+    set_variant_core_data,
+)
 import esphome.config_validation as cv
 from esphome.const import CONF_BOARD, CONF_FRAMEWORK, KEY_CORE
 from esphome.core import CORE, EsphomeError
@@ -19,10 +24,10 @@ from esphome.core import CORE, EsphomeError
 TOOLCHAIN: str = "riscv64-zephyr-elf"
 
 
-VERSION: str = "v4.5.0"
+VERSION = "v4.5.0"
 HALS: frozenset[str] = frozenset({"hal_stm32"})
 # The project filter of a workspace with HALS
-FILTER: str = ",".join(
+FILTER = ",".join(
     [
         "-hal_.*",
         "-nrf_hw_models",
@@ -326,11 +331,9 @@ def test_install_toolchain_removes_only_stale_partial_downloads(
 def test_zephyr_base_is_the_installed_workspace(workspace: Path) -> None:
     """The devicetree readers and the install name the same workspace."""
     CORE.data[KEY_CORE] = {}
-    set_core_data(
-        "STM32C5",
+    set_variant_core_data(
+        ZephyrVariantResolved(stm32c5.VARIANT, ZEPHYR_MAINLINE, cv.Version(4, 5, 0)),
         {CONF_BOARD: "nucleo_c5a3zg", CONF_FRAMEWORK: {}},
-        cv.Version(4, 5, 0),
-        framework_type="zephyr",
         bootloader="",
     )
 
