@@ -8,23 +8,23 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from esphome.components.stm32.zephyr_variants import stm32c5
+from esphome.components import stm32
 from esphome.components.zephyr import (
     run_compile,
     zephyr_additional_framework_projects,
     zephyr_data,
     zephyr_toolchain_to_code,
 )
-from esphome.components.zephyr.const import KEY_PRJ_CONF
+from esphome.components.zephyr.const import KEY_PRJ_CONF, KEY_VARIANT_RESOLVED
 from esphome.components.zephyr.variants import ZEPHYR_MAINLINE
-from esphome.const import CONF_FRAMEWORK, KEY_CORE
+from esphome.const import CONF_VARIANT, KEY_CORE
 from esphome.core import CORE, EsphomeError
 
 
 @pytest.fixture(autouse=True)
 def stm32c5_config() -> None:
     CORE.data[KEY_CORE] = {}
-    stm32c5.config_schema({CONF_FRAMEWORK: {}})
+    stm32.CONFIG_SCHEMA({CONF_VARIANT: "STM32C5"})
 
 
 @pytest.fixture
@@ -93,7 +93,8 @@ def test_to_code_leaves_the_entropy_source_to_the_variant(install: MagicMock) ->
     with (
         _board(),
         patch(
-            "esphome.components.zephyr.dts_lookup.get_rng_node_label", return_value=None
+            "esphome.components.stm32.zephyr_variants.stm32c5.get_rng_node_label",
+            return_value=None,
         ),
     ):
         asyncio.run(zephyr_toolchain_to_code({"board": "nucleo_c5a3zg"}))
@@ -141,9 +142,10 @@ def test_run_compile_fails_with_west(build: MagicMock) -> None:
 
 
 def test_run_compile_needs_the_variant_toolchain(build: MagicMock) -> None:
-    with (
-        patch.object(stm32c5.VARIANT, "toolchain", None),
-        pytest.raises(EsphomeError, match="names no Zephyr SDK toolchain"),
-    ):
+    resolved = zephyr_data()[KEY_VARIANT_RESOLVED]
+    zephyr_data()[KEY_VARIANT_RESOLVED] = replace(
+        resolved, variant=replace(resolved.variant, toolchain=None)
+    )
+    with pytest.raises(EsphomeError, match="names no Zephyr SDK toolchain"):
         run_compile(None, {})
     build.assert_not_called()
