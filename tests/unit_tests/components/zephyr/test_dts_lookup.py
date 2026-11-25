@@ -36,7 +36,7 @@ from esphome.core import CORE, EsphomeError
 
 @pytest.fixture(autouse=True)
 def zephyr_data() -> None:
-    """The devicetree caches as set_core_data leaves them."""
+    """The devicetree caches as set_variant_core_data leaves them."""
     CORE.data[KEY_ZEPHYR] = {
         KEY_CPP_PATH: "",
         KEY_DTS_INCLUDE_PATHS: None,
