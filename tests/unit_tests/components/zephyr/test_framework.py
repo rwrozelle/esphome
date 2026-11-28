@@ -25,6 +25,8 @@ TOOLCHAIN: str = "riscv64-zephyr-elf"
 
 
 VERSION = "v4.5.0"
+# The workspace folder, which also names its venv
+WORKSPACE = f"zephyr-{VERSION}"
 HALS: frozenset[str] = frozenset({"hal_stm32"})
 # The project filter of a workspace with HALS
 FILTER = ",".join(
@@ -45,14 +47,14 @@ def zephyr_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def workspace(zephyr_tools: Path) -> Path:
-    return zephyr_tools / "frameworks" / f"zephyr-{VERSION}"
+    return zephyr_tools / "frameworks" / WORKSPACE
 
 
 @pytest.fixture
 def mock_west(zephyr_tools: Path, workspace: Path) -> Iterator[MagicMock]:
     """run_command_ok for west and pip, with a built venv; west init leaves a
     workspace."""
-    (zephyr_tools / "penvs" / VERSION).mkdir(parents=True)
+    (zephyr_tools / "penvs" / WORKSPACE).mkdir(parents=True)
 
     def _run(cmd: list[str], **kwargs: Any) -> bool:
         if "init" in cmd:
@@ -98,8 +100,8 @@ def _check_and_install(projects: frozenset[str] = HALS) -> None:
 def test_check_and_install_builds_the_venv(
     zephyr_tools: Path, mock_west: MagicMock
 ) -> None:
-    """Each Zephyr version gets its own venv, built from zephyr/requirements.txt
-    under that version's lock, inside the workspace's lock."""
+    """Each workspace gets its own venv, built from zephyr/requirements.txt
+    under the workspace's lock only."""
     with (
         patch.object(framework, "ensure_venv", return_value=False) as ensure,
         patch("filelock.FileLock") as file_lock,
@@ -107,15 +109,13 @@ def test_check_and_install_builds_the_venv(
         _check_and_install()
 
     ensure.assert_called_once_with(
-        zephyr_tools / "penvs" / VERSION,
+        zephyr_tools / "penvs" / WORKSPACE,
         Path(framework.__file__).parent / "requirements.txt",
         VERSION,
     )
     assert framework._REQUIREMENTS.is_file()
     assert [Path(c.args[0]).name for c in file_lock.call_args_list] == [
-        f"zephyr-{VERSION}.lock",
-        f"penv-{VERSION}.lock",
-        f"penv-{VERSION}.lock",
+        f"{WORKSPACE}.lock"
     ]
 
 
@@ -146,7 +146,7 @@ def test_installed_workspace_checks_the_hals(
 ) -> None:
     """Every build checks the names, so an unknown HAL fails on any workspace."""
     _mark_installed(workspace)
-    (zephyr_tools / "penvs" / VERSION / f".zephyr_reqs_ready-zephyr-{VERSION}").touch()
+    (zephyr_tools / "penvs" / WORKSPACE / ".zephyr_reqs_ready").touch()
 
     _check_and_install()
 
@@ -165,17 +165,22 @@ def test_unknown_hal_fails_first(workspace: Path, mock_west: MagicMock) -> None:
     assert _subcommands(mock_west) == ["list"]
 
 
-def test_new_hal_fetches_only_that_hal(
+def test_new_hal_is_added_to_the_filter(
     zephyr_tools: Path, workspace: Path, mock_west: MagicMock
 ) -> None:
-    """A workspace only gains HALs; the projects already there are left alone."""
+    """A workspace only gains HALs; the ones already there stay in the filter."""
     _mark_installed(workspace, frozenset({"hal_nordic"}))
-    (zephyr_tools / "penvs" / VERSION / f".zephyr_reqs_ready-zephyr-{VERSION}").touch()
+    (zephyr_tools / "penvs" / WORKSPACE / ".zephyr_reqs_ready").touch()
 
     _check_and_install()
 
     assert _subcommands(mock_west) == ["list", "config", "update"]
-    assert _west_call(mock_west, "update")[-1:] == ["hal_stm32"]
+    assert _west_call(mock_west, "update") == [
+        "update",
+        "--narrow",
+        "--fetch-opt=--depth=1",
+    ]
+    assert "+hal_stm32" in _west_call(mock_west, "config")[-1]
     assert "+hal_nordic" in _west_call(mock_west, "config")[-1]
     assert "hal_nordic" in (workspace / ".west_projects").read_text(encoding="utf-8")
 
@@ -189,9 +194,7 @@ def test_rebuilt_venv_reinstalls_only_zephyr_requirements(
         _check_and_install()
 
     assert _subcommands(mock_west) == ["list", "install"]
-    assert (
-        zephyr_tools / "penvs" / VERSION / f".zephyr_reqs_ready-zephyr-{VERSION}"
-    ).exists()
+    assert (zephyr_tools / "penvs" / WORKSPACE / ".zephyr_reqs_ready").exists()
 
 
 def test_installed_workspace_gets_the_patches(

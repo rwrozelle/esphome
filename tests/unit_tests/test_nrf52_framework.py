@@ -150,6 +150,8 @@ def _mark_installed(dirs: SimpleNamespace) -> None:
     """Every install step finished: venv, zephyr requirements, SDK, toolchain."""
     _mark_venv_ready(dirs.python_env)
     (dirs.python_env / ".zephyr_reqs_ready").touch()
+    (dirs.framework / ".west").mkdir()
+    (dirs.framework / ".west" / "config").touch()
     (dirs.framework / ".ready").touch()
     (dirs.framework / ".west_projects").write_text(
         "\n".join(sorted(NRF_CONNECT_SDK.required)), encoding="utf-8"
@@ -252,6 +254,8 @@ class TestCheckAndInstall:
         """Venv and framework ready → only toolchain downloaded and extracted."""
         _mark_venv_ready(nrf52_dirs.python_env)
         (nrf52_dirs.python_env / ".zephyr_reqs_ready").touch()
+        (nrf52_dirs.framework / ".west").mkdir()
+        (nrf52_dirs.framework / ".west" / "config").touch()
         (nrf52_dirs.framework / ".ready").touch()
         (nrf52_dirs.framework / ".west_projects").write_text(
             "\n".join(sorted(NRF_CONNECT_SDK.required)), encoding="utf-8"
@@ -264,6 +268,23 @@ class TestCheckAndInstall:
         # minimal SDK + per-arch toolchain
         assert mock_nrf52_ops.download_from_mirrors.call_count == 2
         assert mock_nrf52_ops.archive_extract_all.call_count == 2
+
+    def test_missing_west_config_installs_the_sdk_again(
+        self,
+        nrf52_dirs: SimpleNamespace,
+        mock_nrf52_ops: SimpleNamespace,
+    ) -> None:
+        """West can't run in a workspace without its config."""
+        _mark_installed(nrf52_dirs)
+        (nrf52_dirs.framework / ".west" / "config").unlink()
+
+        check_and_install()
+
+        assert _subcommands(mock_nrf52_ops.run_command_ok)[:3] == [
+            "init",
+            "config",
+            "update",
+        ]
 
     def test_requirements_install_failure_raises(
         self,
@@ -315,12 +336,13 @@ class TestCheckAndInstall:
         mock_nrf52_ops: SimpleNamespace,
     ) -> None:
         """A finished install gains a project another config left out, keeping
-        what it already has; only the new project is updated."""
+        what it already has."""
         _mark_installed(nrf52_dirs)
         (nrf52_dirs.framework / ".west_projects").write_text(
             "cmsis\nhal_nordic\nnrfxlib\ntinycrypt\nzephyr", encoding="utf-8"
         )
-        include_west_project("openthread")
+        # segger comes in through the zephyr import, as debug: adds it
+        include_west_project("segger")
 
         check_and_install()
 
@@ -330,10 +352,15 @@ class TestCheckAndInstall:
             "config",
             "update",
         ]
-        wanted = "-.*,+cmsis,+hal_nordic,+nrfxlib,+openthread,+tinycrypt,+zephyr"
+        wanted = "-.*,+cmsis,+hal_nordic,+nrfxlib,+segger,+tinycrypt,+zephyr"
         assert _project_filter(mock_nrf52_ops.run_command_ok) == wanted
         update = mock_nrf52_ops.run_command_ok.call_args_list[2].args[0]
-        assert update[-1] == "openthread"
+        # No names: west refuses to update by name a project from a manifest import
+        assert update[update.index("update") :] == [
+            "update",
+            "--narrow",
+            "--fetch-opt=--depth=1",
+        ]
         mock_nrf52_ops.rmdir.assert_not_called()
 
     def test_sysbuild_fetches_mcuboot(
