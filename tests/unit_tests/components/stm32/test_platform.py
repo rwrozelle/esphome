@@ -1,5 +1,7 @@
 """Tests for the stm32: platform schema."""
 
+from types import ModuleType
+
 import pytest
 
 from esphome.components import stm32
@@ -123,4 +125,6 @@ def test_schema_extract_gives_the_platform_schema() -> None:
 
 def test_toolchain_schema_lists_only_the_families_variants() -> None:
     with pytest.raises(cv.Invalid, match="Unknown value"):
-        zephyr_toolchain_schema(frozenset({"other"}))({CONF_VARIANT: "STM32C5"})
+        zephyr_toolchain_schema({"OTHER": ModuleType("other")})(
+            {CONF_VARIANT: "STM32C5"}
+        )
