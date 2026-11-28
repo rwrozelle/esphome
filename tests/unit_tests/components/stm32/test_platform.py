@@ -1,5 +1,6 @@
 """Tests for the stm32: platform schema."""
 
+from argparse import Namespace
 from types import ModuleType
 
 import pytest
@@ -25,7 +26,7 @@ from esphome.const import (
     PLATFORM_STM32,
     Toolchain,
 )
-from esphome.core import CORE
+from esphome.core import CORE, EsphomeError
 from esphome.schema_extractors import SCHEMA_EXTRACT
 
 
@@ -128,3 +129,8 @@ def test_toolchain_schema_lists_only_the_families_variants() -> None:
         zephyr_toolchain_schema({"OTHER": ModuleType("other")})(
             {CONF_VARIANT: "STM32C5"}
         )
+
+
+def test_run_compile_says_building_is_not_supported() -> None:
+    with pytest.raises(EsphomeError, match="not supported yet"):
+        stm32.run_compile(Namespace(), {})
